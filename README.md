@@ -66,7 +66,7 @@ See [the testing guide](docs/testing.md) for the end-to-end topology and debuggi
 
 ## Delivery roadmap
 
-1. Harden API and consumer idempotency with concurrent and duplicate-delivery tests.
+1. Harden consumer idempotency with duplicate-delivery tests.
 2. Add circuit breaking and deterministic retry/DLQ failure tests.
 3. Add reconciliation and outbox cleanup/monitoring.
 4. Add Redis only for justified acceleration or coordination.

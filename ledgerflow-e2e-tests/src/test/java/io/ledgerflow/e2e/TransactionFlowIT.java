@@ -23,7 +23,12 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.DriverManager;
 import java.time.Duration;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.StreamSupport;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -35,9 +40,9 @@ class TransactionFlowIT {
     private static final String DATABASE_USERNAME = "ledgerflow";
     private static final String DATABASE_PASSWORD = "ledgerflow-test";
     private static final String NO_DATABASE_AUTOCONFIGURATION = String.join(",",
-        "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
-        "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration",
-        "org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration");
+            "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
+            "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration",
+            "org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration");
 
     @Container
     private static final GenericContainer<?> POSTGRES = new GenericContainer<>(
@@ -130,27 +135,82 @@ class TransactionFlowIT {
         assertThat(transactionId).isNotBlank();
         assertThat(createdBody.path("status").asText()).isEqualTo("PENDING");
 
-        var completed = new JsonNode[1];
-        await().atMost(Duration.ofSeconds(20))
-                .pollInterval(Duration.ofMillis(200))
-                .untilAsserted(() -> {
-                    var retrieved = getTransaction(transactionId);
-                    assertThat(retrieved.statusCode()).isEqualTo(200);
-                    JsonNode body = JSON.readTree(retrieved.body());
-                    assertThat(body.path("status").asText()).isEqualTo("COMPLETED");
-                    assertThat(statuses(body)).containsExactly("PENDING", "PROCESSING", "COMPLETED");
-                    assertThat(body.path("providerReference").asText()).startsWith("sim-");
-                    completed[0] = body;
-                });
+        JsonNode completed = awaitCompleted(transactionId);
 
         var duplicate = postTransaction(idempotencyKey, requestBody);
         assertThat(duplicate.statusCode()).isEqualTo(200);
         JsonNode duplicateBody = JSON.readTree(duplicate.body());
         assertThat(duplicateBody.path("id").asText()).isEqualTo(transactionId);
         assertThat(duplicateBody.path("providerReference").asText())
-                .isEqualTo(completed[0].path("providerReference").asText());
+                .isEqualTo(completed.path("providerReference").asText());
 
-        assertDatabaseState(UUID.fromString(transactionId));
+        assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
+    }
+
+    @Test
+    void createsOneTransactionWhenIdenticalRequestsArriveConcurrently() throws Exception {
+        int requestCount = 10;
+        String idempotencyKey = "e2e-concurrent-" + UUID.randomUUID();
+        String requestBody = """
+                {
+                  "accountId": "acct-concurrent",
+                  "amount": 84.25,
+                  "currency": "USD",
+                  "type": "PAYMENT"
+                }
+                """;
+        var ready = new CountDownLatch(requestCount);
+        var start = new CountDownLatch(1);
+        var executor = Executors.newFixedThreadPool(requestCount);
+
+        List<HttpResponse<String>> responses;
+        try {
+            var requests = java.util.stream.IntStream.range(0, requestCount)
+                    .mapToObj(index -> executor.submit(() -> {
+                        ready.countDown();
+                        if (!start.await(5, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("Timed out waiting to start concurrent requests");
+                        }
+                        return postTransaction(idempotencyKey, requestBody);
+                    }))
+                    .toList();
+
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            responses = requests.stream()
+                    .map(future -> {
+                        try {
+                            return future.get(10, TimeUnit.SECONDS);
+                        } catch (Exception exception) {
+                            throw new IllegalStateException("Concurrent request failed", exception);
+                        }
+                    })
+                    .toList();
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+
+        List<Integer> statusCodes = responses.stream().map(HttpResponse::statusCode).toList();
+        assertThat(statusCodes).containsOnly(200, 202);
+        assertThat(statusCodes.stream().filter(status -> status == 202).count()).isEqualTo(1);
+        assertThat(statusCodes.stream().filter(status -> status == 200).count()).isEqualTo(requestCount - 1L);
+
+        Set<String> transactionIds = responses.stream()
+                .map(HttpResponse::body)
+                .map(body -> {
+                    try {
+                        return JSON.readTree(body).path("id").asText();
+                    } catch (Exception exception) {
+                        throw new IllegalStateException("Could not parse transaction response", exception);
+                    }
+                })
+                .collect(java.util.stream.Collectors.toSet());
+        assertThat(transactionIds).hasSize(1).doesNotContain("");
+
+        String transactionId = transactionIds.iterator().next();
+        awaitCompleted(transactionId);
+        assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
     }
 
     private static ConfigurableApplicationContext start(Class<?> application, String... properties) {
@@ -192,11 +252,28 @@ class TransactionFlowIT {
                 .toList();
     }
 
-    private static void assertDatabaseState(UUID transactionId) throws Exception {
+    private static JsonNode awaitCompleted(String transactionId) {
+        var completed = new JsonNode[1];
+        await().atMost(Duration.ofSeconds(20))
+                .pollInterval(Duration.ofMillis(200))
+                .untilAsserted(() -> {
+                    var retrieved = getTransaction(transactionId);
+                    assertThat(retrieved.statusCode()).isEqualTo(200);
+                    JsonNode body = JSON.readTree(retrieved.body());
+                    assertThat(body.path("status").asText()).isEqualTo("COMPLETED");
+                    assertThat(statuses(body)).containsExactly("PENDING", "PROCESSING", "COMPLETED");
+                    assertThat(body.path("providerReference").asText()).startsWith("sim-");
+                    completed[0] = body;
+                });
+        return completed[0];
+    }
+
+    private static void assertDatabaseState(String idempotencyKey, UUID transactionId) throws Exception {
         try (var connection = DriverManager.getConnection(jdbcUrl(), DATABASE_USERNAME, DATABASE_PASSWORD)) {
             try (var statement = connection.prepareStatement(
-                    "SELECT COUNT(*) FROM transactions WHERE id = ?")) {
-                statement.setObject(1, transactionId);
+                    "SELECT COUNT(*) FROM transactions WHERE idempotency_key = ? AND id = ?")) {
+                statement.setString(1, idempotencyKey);
+                statement.setObject(2, transactionId);
                 try (var result = statement.executeQuery()) {
                     assertThat(result.next()).isTrue();
                     assertThat(result.getInt(1)).isEqualTo(1);
@@ -204,11 +281,12 @@ class TransactionFlowIT {
             }
 
             try (var statement = connection.prepareStatement(
-                    "SELECT COUNT(*) FROM outbox_events WHERE aggregate_id = ? AND published_at IS NOT NULL")) {
+                    "SELECT COUNT(*), COUNT(published_at) FROM outbox_events WHERE aggregate_id = ?")) {
                 statement.setObject(1, transactionId);
                 try (var result = statement.executeQuery()) {
                     assertThat(result.next()).isTrue();
                     assertThat(result.getInt(1)).isEqualTo(1);
+                    assertThat(result.getInt(2)).isEqualTo(1);
                 }
             }
         }

@@ -13,7 +13,7 @@ The `ledgerflow-e2e-tests` module is last in the reactor and uses Maven Failsafe
 
 `TransactionFlowIT` starts ephemeral PostgreSQL and Kafka containers on random host ports. It then boots the provider simulator, processor, and transaction API in the test JVM on random web ports. No manually running Compose services or fixed ports are required.
 
-The test verifies:
+The tests verify:
 
 1. A new request returns `202 Accepted` in `PENDING` state.
 2. The outbox publisher delivers the requested event through Kafka.
@@ -22,6 +22,8 @@ The test verifies:
 5. The provider reference is retained.
 6. Reusing the same idempotency key and payload returns `200 OK`, the same transaction ID, and the same provider reference.
 7. PostgreSQL contains one transaction and one published outbox record.
+8. Ten requests released simultaneously with the same idempotency key produce exactly one `202`, nine `200` responses, and one shared transaction ID.
+9. Concurrent duplicate requests still produce only one transaction row and one published outbox event before completing normally.
 
 ## Commands
 
