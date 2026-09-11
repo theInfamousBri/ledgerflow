@@ -8,6 +8,7 @@ LedgerFlow is a production-minded transaction-processing platform built to demon
 - `transaction-processor`: consumes requested events, calls an idempotent provider API, and emits processing/result events.
 - `payment-provider-simulator`: deterministic idempotent stand-in for an unreliable downstream provider.
 - `transaction-contracts`: versioned event and provider DTOs shared during the first development phase.
+- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete transaction lifecycle.
 - `docs`: technical specification, architecture, and ADRs.
 
 PostgreSQL is the source of record. Redis is deliberately deferred until a measured caching or coordination use case exists.
@@ -43,20 +44,34 @@ Health endpoints are available at `/actuator/health` on ports 8080, 8081, and 80
 
 ## Build
 
+Linux/macOS:
+
 ```bash
-mvn clean verify
+./mvnw clean verify
 ```
+
+Windows PowerShell:
+
+```powershell
+.\mvnw.cmd clean verify
+```
+
+`verify` requires a running Docker engine because the Failsafe integration-test phase starts isolated PostgreSQL and Kafka containers. Unit tests alone can be run without Docker:
+
+```bash
+./mvnw test
+```
+
+See [the testing guide](docs/testing.md) for the end-to-end topology and debugging commands.
 
 ## Delivery roadmap
 
-1. Complete and test the local happy-path vertical slice.
-2. Harden API and consumer idempotency; add legal transition enforcement.
-3. Add exponential retry, circuit breaking, and DLQ operations.
-4. Add reconciliation and outbox cleanup/monitoring.
-5. Add Redis only for justified acceleration or coordination.
-6. Add Testcontainers end-to-end coverage and failure tests.
-7. Add OpenTelemetry, Prometheus, Grafana, and trace examples.
-8. Add CI, Kubernetes manifests, IaC, and measured load tests.
+1. Harden API and consumer idempotency with concurrent and duplicate-delivery tests.
+2. Add circuit breaking and deterministic retry/DLQ failure tests.
+3. Add reconciliation and outbox cleanup/monitoring.
+4. Add Redis only for justified acceleration or coordination.
+5. Add OpenTelemetry, Prometheus, Grafana, and trace examples.
+6. Add Kubernetes manifests, IaC, and measured load tests.
 
 See [the technical specification](docs/technical-specification.md) for the precise contracts and invariants.
 

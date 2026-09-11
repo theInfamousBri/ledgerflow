@@ -22,10 +22,12 @@
         <module>transaction-api</module>
         <module>transaction-processor</module>
         <module>payment-provider-simulator</module>
+        <module>ledgerflow-e2e-tests</module>
     </modules>
 
     <properties>
         <java.version>21</java.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
     </properties>
 
     <build>
