@@ -1,0 +1,17 @@
+server:
+  port: 8082
+spring:
+  application:
+    name: payment-provider-simulator
+provider:
+  failure-rate: ${PROVIDER_FAILURE_RATE:0.0}
+  latency-ms: ${PROVIDER_LATENCY_MS:100}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
