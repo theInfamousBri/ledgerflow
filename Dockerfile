@@ -13,7 +13,7 @@ RUN mvn -q -pl "${MODULE}" -am package -DskipTests
 FROM eclipse-temurin:21-jre
 ARG MODULE
 WORKDIR /app
-COPY --from=build /workspace/${MODULE}/target/${MODULE}-*.jar app.jar
+COPY --from=build /workspace/${MODULE}/target/${MODULE}-*-exec.jar app.jar
 USER 10001
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 

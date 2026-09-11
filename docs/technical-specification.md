@@ -154,7 +154,7 @@ Required future dashboards: API latency/error rate; outbox age/backlog; Kafka co
 
 ## 11. Acceptance tests by milestone
 
-MVP is complete when an end-to-end Testcontainers test proves POST → outbox → Kafka → processor → provider → result event → COMPLETED and GET returns ordered history.
+The MVP end-to-end Testcontainers test proves POST → outbox → Kafka → processor → provider → result event → COMPLETED, verifies ordered history and the published outbox row, and confirms that an identical idempotent replay returns the original resource.
 
 Hardening adds tests for concurrent duplicate submissions, key/payload conflict, requested-event redelivery, provider timeouts, retries, DLT routing, Kafka outage recovery, outbox duplicate publication, illegal transitions, and stuck-state reconciliation.
 
