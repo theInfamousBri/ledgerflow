@@ -5,6 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.ledgerflow.api.TransactionApiApplication;
 import io.ledgerflow.processor.TransactionProcessorApplication;
 import io.ledgerflow.provider.PaymentProviderSimulatorApplication;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -26,11 +30,13 @@ import java.sql.DriverManager;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.StreamSupport;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -42,6 +48,7 @@ class TransactionFlowIT {
     private static final String DATABASE_USERNAME = "ledgerflow";
     private static final String DATABASE_PASSWORD = "ledgerflow-test";
     private static final String REQUESTED_TOPIC = "ledgerflow.transaction.requested.v1";
+    private static final String REQUESTED_DLT_TOPIC = REQUESTED_TOPIC + "-dlt";
     private static final String NO_DATABASE_AUTOCONFIGURATION = String.join(",",
             "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
             "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration",
@@ -303,6 +310,39 @@ class TransactionFlowIT {
         assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
     }
 
+    @Test
+    void routesExhaustedRetriesToDeadLetterTopicAndFailsTransaction() throws Exception {
+        configureNextProviderFailures(4);
+        String idempotencyKey = "e2e-dlt-" + UUID.randomUUID();
+        String requestBody = """
+                {
+                  "accountId": "acct-dlt",
+                  "amount": 91.20,
+                  "currency": "USD",
+                  "type": "PAYMENT"
+                }
+                """;
+
+        var created = postTransaction(idempotencyKey, requestBody);
+        assertThat(created.statusCode()).isEqualTo(202);
+        String transactionId = JSON.readTree(created.body()).path("id").asText();
+        String originalRequestedEvent = requestedEventPayload(UUID.fromString(transactionId));
+
+        JsonNode failed = awaitFailed(transactionId);
+        JsonNode providerPayment = awaitProviderRequestCount(transactionId, 4);
+        assertThat(providerPayment.path("decision").isNull()).isTrue();
+        assertThat(providerPayment.path("attemptedAt").size()).isEqualTo(4);
+
+        ConsumerRecord<String, String> deadLetter = awaitDeadLetter(transactionId);
+        assertThat(deadLetter.key()).isEqualTo(transactionId);
+        assertThat(deadLetter.value()).isEqualTo(originalRequestedEvent);
+
+        assertThat(failed.path("providerReference").isNull()).isTrue();
+        assertThat(failed.path("failureCode").asText()).isEqualTo("RETRIES_EXHAUSTED");
+        assertThat(statuses(failed)).containsExactly("PENDING", "PROCESSING", "FAILED");
+        assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
+    }
+
     private static ConfigurableApplicationContext start(Class<?> application, String... properties) {
         String[] arguments = new String[properties.length + 2];
         arguments[0] = "--spring.config.name=ledgerflow-e2e";
@@ -376,6 +416,22 @@ class TransactionFlowIT {
         return completed[0];
     }
 
+    private static JsonNode awaitFailed(String transactionId) {
+        var failed = new JsonNode[1];
+        await().atMost(Duration.ofSeconds(20))
+                .pollInterval(Duration.ofMillis(200))
+                .untilAsserted(() -> {
+                    var retrieved = getTransaction(transactionId);
+                    assertThat(retrieved.statusCode()).isEqualTo(200);
+                    JsonNode body = JSON.readTree(retrieved.body());
+                    assertThat(body.path("status").asText()).isEqualTo("FAILED");
+                    assertThat(body.path("failureCode").asText()).isEqualTo("RETRIES_EXHAUSTED");
+                    assertThat(statuses(body)).containsExactly("PENDING", "PROCESSING", "FAILED");
+                    failed[0] = body;
+                });
+        return failed[0];
+    }
+
     private static JsonNode awaitProviderRequestCount(String transactionId, int expectedCount) {
         var providerPayment = new JsonNode[1];
         await().atMost(Duration.ofSeconds(10))
@@ -403,6 +459,32 @@ class TransactionFlowIT {
                 return payload;
             }
         }
+    }
+
+    private static ConsumerRecord<String, String> awaitDeadLetter(String transactionId) {
+        var properties = new Properties();
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers());
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "e2e-dlt-inspector-" + UUID.randomUUID());
+        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+
+        var deadLetter = new AtomicReference<ConsumerRecord<String, String>>();
+        try (var consumer = new KafkaConsumer<String, String>(properties)) {
+            consumer.subscribe(List.of(REQUESTED_DLT_TOPIC));
+            await().atMost(Duration.ofSeconds(10))
+                    .until(() -> {
+                        for (var record : consumer.poll(Duration.ofMillis(250))) {
+                            if (transactionId.equals(record.key())) {
+                                deadLetter.set(record);
+                                return true;
+                            }
+                        }
+                        return false;
+                    });
+        }
+        return deadLetter.get();
     }
 
     @SuppressWarnings("unchecked")
