@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.Banner;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -39,6 +40,7 @@ class TransactionFlowIT {
     private static final String DATABASE_NAME = "ledgerflow";
     private static final String DATABASE_USERNAME = "ledgerflow";
     private static final String DATABASE_PASSWORD = "ledgerflow-test";
+    private static final String REQUESTED_TOPIC = "ledgerflow.transaction.requested.v1";
     private static final String NO_DATABASE_AUTOCONFIGURATION = String.join(",",
             "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
             "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration",
@@ -64,6 +66,7 @@ class TransactionFlowIT {
     private static ConfigurableApplicationContext processorContext;
     private static ConfigurableApplicationContext apiContext;
     private static String apiBaseUrl;
+    private static String providerBaseUrl;
 
     @BeforeAll
     static void startSystem() {
@@ -74,6 +77,7 @@ class TransactionFlowIT {
                 "--provider.failure-rate=0.0",
                 "--provider.latency-ms=0");
         int providerPort = localPort(providerContext);
+        providerBaseUrl = "http://localhost:" + providerPort;
 
         processorContext = start(TransactionProcessorApplication.class,
                 "--spring.application.name=e2e-processor",
@@ -87,7 +91,7 @@ class TransactionFlowIT {
                 "--spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer",
                 "--spring.kafka.consumer.auto-offset-reset=earliest",
                 "--spring.kafka.consumer.enable-auto-commit=false",
-                "--ledgerflow.provider.base-url=http://localhost:" + providerPort);
+                "--ledgerflow.provider.base-url=" + providerBaseUrl);
 
         apiContext = start(TransactionApiApplication.class,
                 "--spring.application.name=e2e-api",
@@ -213,6 +217,54 @@ class TransactionFlowIT {
         assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
     }
 
+    @Test
+    void redeliveredRequestedEventDoesNotDuplicateProviderEffectOrHistory() throws Exception {
+        String idempotencyKey = "e2e-redelivery-" + UUID.randomUUID();
+        String requestBody = """
+                {
+                  "accountId": "acct-redelivery",
+                  "amount": 42.10,
+                  "currency": "USD",
+                  "type": "PAYMENT"
+                }
+                """;
+
+        var created = postTransaction(idempotencyKey, requestBody);
+        assertThat(created.statusCode()).isEqualTo(202);
+        String transactionId = JSON.readTree(created.body()).path("id").asText();
+        JsonNode completedBeforeRedelivery = awaitCompleted(transactionId);
+        String providerReference = completedBeforeRedelivery.path("providerReference").asText();
+
+        JsonNode providerBeforeRedelivery = awaitProviderRequestCount(transactionId, 1);
+        assertThat(providerBeforeRedelivery.path("decision").path("providerReference").asText())
+                .isEqualTo(providerReference);
+
+        kafka().send(REQUESTED_TOPIC, transactionId,
+                        requestedEventPayload(UUID.fromString(transactionId)))
+                .get(5, TimeUnit.SECONDS);
+
+        JsonNode providerAfterRedelivery = awaitProviderRequestCount(transactionId, 2);
+        assertThat(providerAfterRedelivery.path("decision").path("providerReference").asText())
+                .isEqualTo(providerReference);
+
+        await().pollDelay(Duration.ofSeconds(1))
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    var providerPayment = getProviderPayment(transactionId);
+                    assertThat(providerPayment.statusCode()).isEqualTo(200);
+                    assertThat(JSON.readTree(providerPayment.body()).path("requestCount").asInt()).isEqualTo(2);
+
+                    var retrieved = getTransaction(transactionId);
+                    assertThat(retrieved.statusCode()).isEqualTo(200);
+                    JsonNode body = JSON.readTree(retrieved.body());
+                    assertThat(body.path("status").asText()).isEqualTo("COMPLETED");
+                    assertThat(body.path("providerReference").asText()).isEqualTo(providerReference);
+                    assertThat(statuses(body)).containsExactly("PENDING", "PROCESSING", "COMPLETED");
+                });
+
+        assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
+    }
+
     private static ConfigurableApplicationContext start(Class<?> application, String... properties) {
         String[] arguments = new String[properties.length + 2];
         arguments[0] = "--spring.config.name=ledgerflow-e2e";
@@ -246,6 +298,14 @@ class TransactionFlowIT {
         return HTTP.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
+    private static HttpResponse<String> getProviderPayment(String transactionId) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create(providerBaseUrl + "/provider/payments/" + transactionId))
+                .timeout(Duration.ofSeconds(5))
+                .GET()
+                .build();
+        return HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
     private static Iterable<String> statuses(JsonNode transaction) {
         return StreamSupport.stream(transaction.path("history").spliterator(), false)
                 .map(item -> item.path("status").asText())
@@ -266,6 +326,40 @@ class TransactionFlowIT {
                     completed[0] = body;
                 });
         return completed[0];
+    }
+
+    private static JsonNode awaitProviderRequestCount(String transactionId, int expectedCount) {
+        var providerPayment = new JsonNode[1];
+        await().atMost(Duration.ofSeconds(10))
+                .pollInterval(Duration.ofMillis(100))
+                .untilAsserted(() -> {
+                    var retrieved = getProviderPayment(transactionId);
+                    assertThat(retrieved.statusCode()).isEqualTo(200);
+                    JsonNode body = JSON.readTree(retrieved.body());
+                    assertThat(body.path("requestCount").asInt()).isEqualTo(expectedCount);
+                    providerPayment[0] = body;
+                });
+        return providerPayment[0];
+    }
+
+    private static String requestedEventPayload(UUID transactionId) throws Exception {
+        try (var connection = DriverManager.getConnection(jdbcUrl(), DATABASE_USERNAME, DATABASE_PASSWORD);
+             var statement = connection.prepareStatement(
+                     "SELECT payload FROM outbox_events WHERE aggregate_id = ? AND topic = ?")) {
+            statement.setObject(1, transactionId);
+            statement.setString(2, REQUESTED_TOPIC);
+            try (var result = statement.executeQuery()) {
+                assertThat(result.next()).isTrue();
+                String payload = result.getString(1);
+                assertThat(result.next()).isFalse();
+                return payload;
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static KafkaTemplate<String, String> kafka() {
+        return (KafkaTemplate<String, String>) processorContext.getBean(KafkaTemplate.class);
     }
 
     private static void assertDatabaseState(String idempotencyKey, UUID transactionId) throws Exception {

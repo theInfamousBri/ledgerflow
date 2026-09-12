@@ -24,6 +24,10 @@ The tests verify:
 7. PostgreSQL contains one transaction and one published outbox record.
 8. Ten requests released simultaneously with the same idempotency key produce exactly one `202`, nine `200` responses, and one shared transaction ID.
 9. Concurrent duplicate requests still produce only one transaction row and one published outbox event before completing normally.
+10. Republishing the original requested event causes a real Kafka redelivery and a second provider request using the same transaction ID as its idempotency key.
+11. The provider returns its original decision, while the authoritative transaction retains one provider reference and exactly three history entries.
+
+The redelivery scenario intentionally does not claim exactly-once execution. The processor can call an external dependency again after Kafka redelivery. LedgerFlow instead requires an idempotent provider contract and idempotent state application so the repeated attempt cannot create a second payment effect or corrupt transaction history.
 
 ## Commands
 
