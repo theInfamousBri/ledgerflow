@@ -26,8 +26,13 @@ The tests verify:
 9. Concurrent duplicate requests still produce only one transaction row and one published outbox event before completing normally.
 10. Republishing the original requested event causes a real Kafka redelivery and a second provider request using the same transaction ID as its idempotency key.
 11. The provider returns its original decision, while the authoritative transaction retains one provider reference and exactly three history entries.
+12. A provider configured to fail its first two requests is called exactly three times before the transaction completes.
+13. Recorded attempt times prove the retry delays include the configured 500-millisecond and 1,000-millisecond exponential backoffs.
+14. Repeated `PROCESSING` events emitted by retries do not create duplicate history entries.
 
 The redelivery scenario intentionally does not claim exactly-once execution. The processor can call an external dependency again after Kafka redelivery. LedgerFlow instead requires an idempotent provider contract and idempotent state application so the repeated attempt cannot create a second payment effect or corrupt transaction history.
+
+The provider's fail-first control is deterministic and one-shot. This keeps retry tests repeatable while leaving the random failure-rate option available for exploratory local testing.
 
 ## Commands
 
