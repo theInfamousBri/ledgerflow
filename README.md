@@ -8,7 +8,7 @@ LedgerFlow is a production-minded transaction-processing platform built to demon
 - `transaction-processor`: consumes requested events, calls an idempotent provider API, and emits processing/result events.
 - `payment-provider-simulator`: deterministic idempotent stand-in for an unreliable downstream provider.
 - `transaction-contracts`: versioned event and provider DTOs shared during the first development phase.
-- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete transaction lifecycle.
+- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete lifecycle, concurrent idempotency, Kafka redelivery, and retry behavior.
 - `docs`: technical specification, architecture, and ADRs.
 
 PostgreSQL is the source of record. Redis is deliberately deferred until a measured caching or coordination use case exists.
@@ -66,7 +66,7 @@ See [the testing guide](docs/testing.md) for the end-to-end topology and debuggi
 
 ## Delivery roadmap
 
-1. Add deterministic retry, backoff, and dead-letter failure tests.
+1. Verify exhausted retries, dead-letter routing, and terminal failure handling.
 2. Add circuit breaking and provider timeout coverage.
 3. Add reconciliation and outbox cleanup/monitoring.
 4. Add Redis only for justified acceleration or coordination.
@@ -74,4 +74,3 @@ See [the testing guide](docs/testing.md) for the end-to-end topology and debuggi
 6. Add Kubernetes manifests, IaC, and measured load tests.
 
 See [the technical specification](docs/technical-specification.md) for the precise contracts and invariants.
-

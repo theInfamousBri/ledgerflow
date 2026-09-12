@@ -24,6 +24,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.DriverManager;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -265,6 +266,43 @@ class TransactionFlowIT {
         assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
     }
 
+    @Test
+    void retriesTransientProviderFailuresWithExponentialBackoff() throws Exception {
+        configureNextProviderFailures(2);
+        String idempotencyKey = "e2e-retry-" + UUID.randomUUID();
+        String requestBody = """
+                {
+                  "accountId": "acct-retry",
+                  "amount": 63.75,
+                  "currency": "USD",
+                  "type": "PAYMENT"
+                }
+                """;
+
+        var created = postTransaction(idempotencyKey, requestBody);
+        assertThat(created.statusCode()).isEqualTo(202);
+        String transactionId = JSON.readTree(created.body()).path("id").asText();
+
+        JsonNode completed = awaitCompleted(transactionId);
+        JsonNode providerPayment = awaitProviderRequestCount(transactionId, 3);
+        assertThat(providerPayment.path("decision").path("providerReference").asText())
+                .isEqualTo(completed.path("providerReference").asText());
+
+        List<Instant> attemptTimes = StreamSupport.stream(
+                        providerPayment.path("attemptedAt").spliterator(), false)
+                .map(item -> Instant.parse(item.asText()))
+                .toList();
+        assertThat(attemptTimes).hasSize(3);
+        long firstBackoffMillis = Duration.between(attemptTimes.get(0), attemptTimes.get(1)).toMillis();
+        long secondBackoffMillis = Duration.between(attemptTimes.get(1), attemptTimes.get(2)).toMillis();
+        assertThat(firstBackoffMillis).isGreaterThanOrEqualTo(400);
+        assertThat(secondBackoffMillis).isGreaterThanOrEqualTo(900);
+
+        assertThat(completed.path("failureCode").isNull()).isTrue();
+        assertThat(statuses(completed)).containsExactly("PENDING", "PROCESSING", "COMPLETED");
+        assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
+    }
+
     private static ConfigurableApplicationContext start(Class<?> application, String... properties) {
         String[] arguments = new String[properties.length + 2];
         arguments[0] = "--spring.config.name=ledgerflow-e2e";
@@ -304,6 +342,16 @@ class TransactionFlowIT {
                 .GET()
                 .build();
         return HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static void configureNextProviderFailures(int attempts) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create(
+                        providerBaseUrl + "/provider/payments/simulation/fail-next?attempts=" + attempts))
+                .timeout(Duration.ofSeconds(5))
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        var response = HTTP.send(request, HttpResponse.BodyHandlers.discarding());
+        assertThat(response.statusCode()).isEqualTo(204);
     }
 
     private static Iterable<String> statuses(JsonNode transaction) {

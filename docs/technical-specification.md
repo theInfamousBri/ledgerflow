@@ -156,7 +156,7 @@ Required future dashboards: API latency/error rate; outbox age/backlog; Kafka co
 
 The MVP end-to-end Testcontainers test proves POST → outbox → Kafka → processor → provider → result event → COMPLETED, verifies ordered history and the published outbox row, and confirms that an identical idempotent replay returns the original resource.
 
-The end-to-end suite covers concurrent duplicate submissions and requested-event redelivery. Further hardening adds tests for key/payload conflict, provider timeouts, retries, DLT routing, Kafka outage recovery, outbox duplicate publication, illegal transitions, and stuck-state reconciliation.
+The end-to-end suite covers concurrent duplicate submissions, requested-event redelivery, and successful recovery after deterministic transient provider failures with exponential backoff. Further hardening adds tests for key/payload conflict, provider timeouts, exhausted-retry DLT routing, Kafka outage recovery, outbox duplicate publication, illegal transitions, and stuck-state reconciliation.
 
 ## 12. Explicit deferrals
 
