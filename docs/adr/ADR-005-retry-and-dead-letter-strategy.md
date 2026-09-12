@@ -17,5 +17,5 @@ The bounded attempt count prevents poison messages and persistent downstream fai
 - A successful retry completes the original transaction without duplicate history entries.
 - Every attempt repeats the provider request with the transaction ID as its idempotency key.
 - Recovery is eventually consistent and takes at least the accumulated backoff time.
-- Exhausted events require explicit dead-letter handling and operational visibility.
+- The DLT handler marks the transaction `FAILED` with `RETRIES_EXHAUSTED`; operational visibility and replay tooling remain future work.
 - The provider simulator supports deterministic fail-first plans and attempt timestamps so retry behavior can be verified without random tests.
