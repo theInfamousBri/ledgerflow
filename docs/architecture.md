@@ -41,6 +41,27 @@ Provider HTTP calls use bounded connect and read timeouts. Because a timeout lea
 
 Published outbox rows are retained for a configurable period and then removed in bounded batches. Cleanup locks only its selected rows and skips rows already locked by another application instance. Backlog size, oldest-pending-event age, publish outcomes, and cleanup throughput are exposed as Micrometer metrics. See [ADR-007](adr/ADR-007-outbox-retention-and-monitoring.md).
 
+## Reconciliation sequence
+
+```mermaid
+sequenceDiagram
+    participant A as Transaction API
+    participant D as PostgreSQL
+    participant K as Kafka
+    participant P as Processor
+    participant S as Provider
+    A->>D: lock stale PROCESSING batch
+    A->>D: mark requested + write outbox
+    A->>K: reconciliation request
+    K->>P: consume request
+    P->>S: GET recorded decision
+    S-->>P: decision or unresolved
+    P->>K: terminal status when resolved
+    K->>A: apply normal status transition
+```
+
+The scan and reconciliation-request outbox write commit together. A missing provider record or incomplete decision leaves authoritative state unchanged and becomes eligible for another request after the configured delay. See [ADR-008](adr/ADR-008-stuck-transaction-reconciliation.md).
+
 ## Provider sequence
 
 ```mermaid

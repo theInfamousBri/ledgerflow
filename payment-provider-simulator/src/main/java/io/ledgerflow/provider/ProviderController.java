@@ -108,9 +108,4 @@ public class ProviderController {
         return processingDelay == null ? latencyMs : processingDelay;
     }
 
-    public record ProviderPaymentStatus(
-            UUID transactionId,
-            ProviderPaymentResponse decision,
-            int requestCount,
-            List<Instant> attemptedAt) {}
 }

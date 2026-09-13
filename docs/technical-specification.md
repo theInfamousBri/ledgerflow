@@ -104,6 +104,7 @@ Kafka delivery is at least once. Consumers must assume duplicates. The provider 
 - SHA-256 `request_fingerprint` used to reject key/payload mismatches
 - amount `numeric(19,2)` plus three-character currency
 - state, provider reference, failure code, timestamps, optimistic-lock version
+- reconciliation request timestamp and attempt count for stale-state throttling
 
 Creation also acquires a transaction-scoped PostgreSQL advisory lock derived from the idempotency key. This serializes concurrent submissions of the same key before the lookup/insert while the unique constraint remains the final invariant.
 
@@ -127,6 +128,8 @@ Published rows are retained for seven days by default, then removed in configura
 6. Terminal transaction states are immutable.
 7. Provider retries use the same provider idempotency identifier.
 8. Outbox retention cleanup never deletes an unpublished event.
+9. Reconciliation changes authoritative state only through the normal status-event consumer.
+10. An unresolved provider lookup never guesses a terminal transaction state.
 
 ## 8. Failure behavior
 
@@ -140,7 +143,9 @@ Published rows are retained for seven days by default, then removed in configura
 | provider timeout/5xx | exponential retry; then DLT |
 | result event redelivered | event ID uniqueness makes application a no-op |
 | out-of-order state event | state machine rejects it and emits a metric/log |
-| transaction stuck in PROCESSING | future reconciler queries provider state and repairs it |
+| transaction stuck in PROCESSING | scanner queues a durable lookup; recorded provider decisions repair state through the normal status topic |
+| reconciliation lookup unresolved | leave state unchanged and make it eligible after the retry delay |
+| reconciliation lookup repeatedly fails | route request to its DLT; a later scan can request it again |
 
 ## 9. Security and data handling
 
@@ -154,14 +159,14 @@ Published rows are retained for seven days by default, then removed in configura
 
 Every request/event carries W3C trace context when OpenTelemetry is added. Initial logs include transaction ID, event ID, and trace ID as structured fields. Actuator exposes liveness/readiness and Micrometer metrics.
 
-Current outbox signals include unpublished backlog, oldest-pending-event age, publication successes/failures, cleanup deletions, and metric-refresh failures. Future dashboards add API latency/error rate, Kafka consumer lag, provider latency/failure/circuit state, transitions by result, and reconciliation repairs.
+Current operational signals include outbox backlog/age/outcomes/cleanup plus reconciliation scans, requests, resolutions, unresolved lookups, and exhausted failures. Future dashboards add API latency/error rate, Kafka consumer lag, provider latency/failure/circuit state, and transitions by result.
 
 ## 11. Acceptance tests by milestone
 
 The MVP end-to-end Testcontainers test proves POST → outbox → Kafka → processor → provider → result event → COMPLETED, verifies ordered history and the published outbox row, and confirms that an identical idempotent replay returns the original resource.
 
-The end-to-end suite covers concurrent duplicate submissions, requested-event redelivery, successful recovery after transient provider failures and ambiguous provider timeouts, exponential backoff, circuit opening/recovery, exhausted-retry DLT routing, terminal failure handling, and published-event retention cleanup. Further hardening adds tests for key/payload conflict, Kafka outage recovery, outbox duplicate publication, illegal transitions, and stuck-state reconciliation.
+The end-to-end suite covers concurrent duplicate submissions, requested-event redelivery, successful recovery after transient provider failures and ambiguous provider timeouts, exponential backoff, circuit opening/recovery, exhausted-retry DLT routing, terminal failure handling, published-event retention cleanup, and repair of a stuck transaction from its recorded provider decision. Further hardening adds tests for key/payload conflict, Kafka outage recovery, outbox duplicate publication, and illegal transitions.
 
 ## 12. Explicit deferrals
 
-Redis, reconciliation, the OpenTelemetry collector/dashboard stack, Kubernetes, AWS deployment, and load tests remain planned.
+Redis, the OpenTelemetry collector/dashboard stack, Kubernetes, AWS deployment, and load tests remain planned.

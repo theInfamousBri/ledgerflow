@@ -36,6 +36,10 @@ public class TransactionEntity {
     private Instant createdAt;
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
+    @Column(name = "reconciliation_requested_at")
+    private Instant reconciliationRequestedAt;
+    @Column(name = "reconciliation_attempts", nullable = false)
+    private int reconciliationAttempts;
     @Version
     private long version;
 
@@ -64,6 +68,11 @@ public class TransactionEntity {
         this.updatedAt = at;
     }
 
+    public void markReconciliationRequested(Instant at) {
+        this.reconciliationRequestedAt = at;
+        this.reconciliationAttempts++;
+    }
+
     public UUID getId() { return id; }
     public String getIdempotencyKey() { return idempotencyKey; }
     public String getRequestFingerprint() { return requestFingerprint; }
@@ -76,5 +85,7 @@ public class TransactionEntity {
     public String getFailureCode() { return failureCode; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
+    public Instant getReconciliationRequestedAt() { return reconciliationRequestedAt; }
+    public int getReconciliationAttempts() { return reconciliationAttempts; }
 }
 

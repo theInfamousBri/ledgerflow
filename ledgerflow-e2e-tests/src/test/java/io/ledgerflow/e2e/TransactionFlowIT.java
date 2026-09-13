@@ -7,6 +7,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.ledgerflow.api.TransactionApiApplication;
 import io.ledgerflow.api.messaging.OutboxMaintenance;
+import io.ledgerflow.api.messaging.ReconciliationScanner;
 import io.ledgerflow.contracts.TransactionRequestedEvent;
 import io.ledgerflow.contracts.TransactionType;
 import io.ledgerflow.processor.ProviderClient;
@@ -138,7 +139,10 @@ class TransactionFlowIT {
                 "--spring.kafka.consumer.auto-offset-reset=earliest",
                 "--ledgerflow.outbox.publish-delay-ms=50",
                 "--ledgerflow.outbox.cleanup-initial-delay=1h",
-                "--ledgerflow.outbox.metrics-initial-delay=1h");
+                "--ledgerflow.outbox.metrics-initial-delay=1h",
+                "--ledgerflow.reconciliation.stale-after=1m",
+                "--ledgerflow.reconciliation.retry-delay=5m",
+                "--ledgerflow.reconciliation.initial-delay=1h");
         apiBaseUrl = "http://localhost:" + localPort(apiContext);
     }
 
@@ -469,6 +473,47 @@ class TransactionFlowIT {
         assertTransactionRetainedWithoutOutbox(idempotencyKey, transactionId);
     }
 
+    @Test
+    void reconcilesStuckProcessingTransactionFromRecordedProviderDecision() throws Exception {
+        String idempotencyKey = "e2e-reconciliation-" + UUID.randomUUID();
+        String requestBody = """
+                {
+                  "accountId": "acct-reconciliation",
+                  "amount": 76.15,
+                  "currency": "USD",
+                  "type": "PAYMENT"
+                }
+                """;
+
+        var created = postTransaction(idempotencyKey, requestBody);
+        assertThat(created.statusCode()).isEqualTo(202);
+        UUID transactionId = UUID.fromString(JSON.readTree(created.body()).path("id").asText());
+        JsonNode originallyCompleted = awaitCompleted(transactionId.toString());
+        String providerReference = originallyCompleted.path("providerReference").asText();
+        assertThat(awaitProviderRequestCount(transactionId.toString(), 1).path("requestCount").asInt())
+                .isEqualTo(1);
+        simulateLostTerminalStatus(transactionId);
+
+        MeterRegistry apiMetrics = apiContext.getBean(MeterRegistry.class);
+        MeterRegistry processorMetrics = processorContext.getBean(MeterRegistry.class);
+        double requestedBefore = apiMetrics.get("ledgerflow.reconciliation.requested").counter().count();
+        double resolvedBefore = processorMetrics.get("ledgerflow.reconciliation.resolved").counter().count();
+        int queued = apiContext.getBean(ReconciliationScanner.class).scan();
+
+        assertThat(queued).isEqualTo(1);
+        JsonNode repaired = awaitCompleted(transactionId.toString());
+        assertThat(repaired.path("providerReference").asText()).isEqualTo(providerReference);
+        assertThat(statuses(repaired)).containsExactly("PENDING", "PROCESSING", "COMPLETED");
+        assertThat(awaitProviderRequestCount(transactionId.toString(), 1).path("requestCount").asInt())
+                .isEqualTo(1);
+        assertThat(apiMetrics.get("ledgerflow.reconciliation.requested").counter().count())
+                .isEqualTo(requestedBefore + 1);
+        assertThat(processorMetrics.get("ledgerflow.reconciliation.resolved").counter().count())
+                .isEqualTo(resolvedBefore + 1);
+        assertReconciliationDatabaseState(idempotencyKey, transactionId);
+        assertThat(apiContext.getBean(ReconciliationScanner.class).scan()).isZero();
+    }
+
     private static ConfigurableApplicationContext start(Class<?> application, String... properties) {
         String[] arguments = new String[properties.length + 2];
         arguments[0] = "--spring.config.name=ledgerflow-e2e";
@@ -694,6 +739,63 @@ class TransactionFlowIT {
                 try (var result = statement.executeQuery()) {
                     assertThat(result.next()).isTrue();
                     assertThat(result.getInt(1)).isZero();
+                }
+            }
+        }
+    }
+
+    private static void simulateLostTerminalStatus(UUID transactionId) throws Exception {
+        try (var connection = DriverManager.getConnection(jdbcUrl(), DATABASE_USERNAME, DATABASE_PASSWORD)) {
+            try (var statement = connection.prepareStatement(
+                    "DELETE FROM transaction_status_history WHERE transaction_id = ? AND status = 'COMPLETED'")) {
+                statement.setObject(1, transactionId);
+                assertThat(statement.executeUpdate()).isEqualTo(1);
+            }
+            try (var statement = connection.prepareStatement("""
+                    UPDATE transactions
+                    SET status = 'PROCESSING',
+                        provider_reference = NULL,
+                        failure_code = NULL,
+                        updated_at = CURRENT_TIMESTAMP - INTERVAL '10 minutes',
+                        reconciliation_requested_at = NULL,
+                        reconciliation_attempts = 0
+                    WHERE id = ?
+                    """)) {
+                statement.setObject(1, transactionId);
+                assertThat(statement.executeUpdate()).isEqualTo(1);
+            }
+        }
+    }
+
+    private static void assertReconciliationDatabaseState(
+            String idempotencyKey, UUID transactionId) throws Exception {
+        try (var connection = DriverManager.getConnection(jdbcUrl(), DATABASE_USERNAME, DATABASE_PASSWORD)) {
+            try (var statement = connection.prepareStatement("""
+                    SELECT status, provider_reference, reconciliation_attempts
+                    FROM transactions
+                    WHERE idempotency_key = ? AND id = ?
+                    """)) {
+                statement.setString(1, idempotencyKey);
+                statement.setObject(2, transactionId);
+                try (var result = statement.executeQuery()) {
+                    assertThat(result.next()).isTrue();
+                    assertThat(result.getString("status")).isEqualTo("COMPLETED");
+                    assertThat(result.getString("provider_reference")).startsWith("sim-");
+                    assertThat(result.getInt("reconciliation_attempts")).isEqualTo(1);
+                }
+            }
+            try (var statement = connection.prepareStatement("""
+                    SELECT COUNT(*), COUNT(published_at)
+                    FROM outbox_events
+                    WHERE aggregate_id = ?
+                      AND topic = ?
+                    """)) {
+                statement.setObject(1, transactionId);
+                statement.setString(2, ReconciliationScanner.RECONCILIATION_TOPIC);
+                try (var result = statement.executeQuery()) {
+                    assertThat(result.next()).isTrue();
+                    assertThat(result.getInt(1)).isEqualTo(1);
+                    assertThat(result.getInt(2)).isEqualTo(1);
                 }
             }
         }
