@@ -5,22 +5,30 @@ LedgerFlow is a production-minded transaction-processing platform built to demon
 ## Architecture
 
 ```mermaid
-flowchart TB
-    Client[Client] --> API[Transaction API]
-    API -->|Transaction + history + outbox| DB[(PostgreSQL)]
-    DB --> Outbox[Outbox Publisher]
-    Outbox --> Requested[Kafka requested topic]
-    Requested --> Processor[Transaction Processor]
-    Processor --> Provider[Payment Provider Simulator]
-    Processor --> Status[Kafka status topic]
+flowchart TD
+    Client["Client"] --> API["Transaction API"]
+    API --> Database[(PostgreSQL)]
+    Database --> Publisher["Outbox Publisher"]
+    Publisher --> Requested["Kafka requested topic"]
+    Requested --> Processor["Transaction Processor"]
+    Processor --> Provider["Payment Provider Simulator"]
+    Processor --> Status["Kafka status topic"]
     Status --> API
-
-    Requested -. transient failure .-> Retry[Kafka retry topics]
-    Retry --> Processor
-    Retry -. attempts exhausted .-> DLT[Dead-letter topic]
 ```
 
-PostgreSQL is the source of record. The transactional outbox prevents lost events across the database/Kafka boundary, while idempotency, retry topics, and dead-letter handling make at-least-once processing safe.
+Failure handling is asynchronous and bounded:
+
+```mermaid
+flowchart TD
+    Attempt["Processing attempt"] --> Failure["Transient provider failure"]
+    Failure --> Retry["Kafka retry topic"]
+    Retry --> NextAttempt["Later processing attempt"]
+    NextAttempt --> Success["Status event"]
+    NextAttempt --> Exhausted["Attempts exhausted"]
+    Exhausted --> DLT["Dead-letter topic"]
+```
+
+PostgreSQL is the source of record. The transactional outbox prevents lost events across the database/Kafka boundary, while idempotency, retry topics, circuit breaking, and dead-letter handling make at-least-once processing safe.
 
 ## What exists in this skeleton
 
