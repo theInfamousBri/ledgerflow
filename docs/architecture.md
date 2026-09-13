@@ -37,6 +37,8 @@ Kafka delivery is at least once. When a requested event is redelivered, the proc
 
 Transient processing failures move through non-blocking Kafka retry topics with exponential backoff. Attempts are bounded, after which the record moves to a dead-letter topic for explicit failure handling. See [ADR-005](adr/ADR-005-retry-and-dead-letter-strategy.md).
 
+Provider HTTP calls use bounded connect and read timeouts. Because a timeout leaves the downstream outcome unknown, every retry reuses the transaction ID and can recover a provider decision completed after an earlier client timeout. See [ADR-006](adr/ADR-006-provider-timeout-semantics.md).
+
 ## Provider sequence
 
 ```mermaid

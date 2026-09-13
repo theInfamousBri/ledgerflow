@@ -23,7 +23,9 @@ public class ProviderController {
     private final Map<UUID, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
     private final Map<UUID, List<Instant>> attemptTimes = new ConcurrentHashMap<>();
     private final Map<UUID, AtomicInteger> remainingPlannedFailures = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> processingDelays = new ConcurrentHashMap<>();
     private final Queue<Integer> nextFailurePlans = new ConcurrentLinkedQueue<>();
+    private final Queue<Long> nextDelayPlans = new ConcurrentLinkedQueue<>();
     private final double failureRate;
     private final long latencyMs;
 
@@ -45,8 +47,12 @@ public class ProviderController {
         requestCounts.computeIfAbsent(request.transactionId(), ignored -> new AtomicInteger()).incrementAndGet();
         attemptTimes.computeIfAbsent(request.transactionId(), ignored -> new CopyOnWriteArrayList<>())
                 .add(Instant.now());
-        Thread.sleep(latencyMs);
         var existing = decisions.get(request.transactionId());
+        if (existing != null) return existing;
+        long processingDelay = processingDelays.computeIfAbsent(request.transactionId(),
+                ignored -> nextProcessingDelay());
+        Thread.sleep(processingDelay);
+        existing = decisions.get(request.transactionId());
         if (existing != null) return existing;
         var plannedFailures = remainingPlannedFailures.computeIfAbsent(request.transactionId(),
                 ignored -> new AtomicInteger(nextFailureCount()));
@@ -71,6 +77,16 @@ public class ProviderController {
         nextFailurePlans.add(attempts);
     }
 
+    @PostMapping("/simulation/delay-next")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delayNext(@RequestParam long milliseconds) {
+        if (milliseconds < 1 || milliseconds > 60_000) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "milliseconds must be between 1 and 60000");
+        }
+        nextDelayPlans.add(milliseconds);
+    }
+
     @GetMapping("/{transactionId}")
     public ProviderPaymentStatus get(@PathVariable UUID transactionId) {
         var decision = decisions.get(transactionId);
@@ -85,6 +101,11 @@ public class ProviderController {
     private int nextFailureCount() {
         Integer failureCount = nextFailurePlans.poll();
         return failureCount == null ? 0 : failureCount;
+    }
+
+    private long nextProcessingDelay() {
+        Long processingDelay = nextDelayPlans.poll();
+        return processingDelay == null ? latencyMs : processingDelay;
     }
 
     public record ProviderPaymentStatus(

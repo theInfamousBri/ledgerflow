@@ -2,13 +2,33 @@
 
 LedgerFlow is a production-minded transaction-processing platform built to demonstrate reliable asynchronous backend design with Java 21, Spring Boot, Kafka, and PostgreSQL.
 
+## Architecture
+
+```mermaid
+flowchart TB
+    Client[Client] --> API[Transaction API]
+    API -->|Transaction + history + outbox| DB[(PostgreSQL)]
+    DB --> Outbox[Outbox Publisher]
+    Outbox --> Requested[Kafka requested topic]
+    Requested --> Processor[Transaction Processor]
+    Processor --> Provider[Payment Provider Simulator]
+    Processor --> Status[Kafka status topic]
+    Status --> API
+
+    Requested -. transient failure .-> Retry[Kafka retry topics]
+    Retry --> Processor
+    Retry -. attempts exhausted .-> DLT[Dead-letter topic]
+```
+
+PostgreSQL is the source of record. The transactional outbox prevents lost events across the database/Kafka boundary, while idempotency, retry topics, and dead-letter handling make at-least-once processing safe.
+
 ## What exists in this skeleton
 
 - `transaction-api`: accepts idempotent transaction requests, owns authoritative state, records status history, and writes an outbox event in the same database transaction.
 - `transaction-processor`: consumes requested events, calls an idempotent provider API, and emits processing/result events.
 - `payment-provider-simulator`: deterministic idempotent stand-in for an unreliable downstream provider.
 - `transaction-contracts`: versioned event and provider DTOs shared during the first development phase.
-- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete lifecycle, concurrent idempotency, Kafka redelivery, retry behavior, and dead-letter handling.
+- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete lifecycle, concurrent idempotency, Kafka redelivery, retries, timeouts, and dead-letter handling.
 - `docs`: technical specification, architecture, and ADRs.
 
 PostgreSQL is the source of record. Redis is deliberately deferred until a measured caching or coordination use case exists.
@@ -66,7 +86,7 @@ See [the testing guide](docs/testing.md) for the end-to-end topology and debuggi
 
 ## Delivery roadmap
 
-1. Add circuit breaking and provider timeout coverage.
+1. Add circuit-breaker behavior and recovery coverage.
 2. Add reconciliation and outbox cleanup/monitoring.
 3. Add Redis only for justified acceleration or coordination.
 4. Add OpenTelemetry, Prometheus, Grafana, and trace examples.

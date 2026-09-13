@@ -21,12 +21,17 @@ public class TransactionProcessorApplication {
         RestClient.Builder builder,
         org.springframework.core.env.Environment environment) {
 
+        Duration connectTimeout = environment.getProperty(
+            "ledgerflow.provider.connect-timeout", Duration.class, Duration.ofSeconds(1));
+        Duration readTimeout = environment.getProperty(
+            "ledgerflow.provider.read-timeout", Duration.class, Duration.ofSeconds(2));
+
         var httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(1))
+            .connectTimeout(connectTimeout)
             .build();
 
         var requestFactory = new JdkClientHttpRequestFactory(httpClient);
-        requestFactory.setReadTimeout(Duration.ofSeconds(2));
+        requestFactory.setReadTimeout(readTimeout);
 
         return builder
             .requestFactory(requestFactory)

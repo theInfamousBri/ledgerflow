@@ -17,6 +17,8 @@ spring:
 ledgerflow:
   provider:
     base-url: ${PROVIDER_BASE_URL:http://localhost:8082}
+    connect-timeout: ${PROVIDER_CONNECT_TIMEOUT:1s}
+    read-timeout: ${PROVIDER_READ_TIMEOUT:2s}
 management:
   endpoints:
     web:
