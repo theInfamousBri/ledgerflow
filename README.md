@@ -2,6 +2,26 @@
 
 LedgerFlow is a production-minded transaction-processing platform built to demonstrate reliable asynchronous backend design with Java 21, Spring Boot, Kafka, and PostgreSQL.
 
+## Architecture
+
+```mermaid
+flowchart TB
+    Client[Client] --> API[Transaction API]
+    API -->|Transaction + history + outbox| DB[(PostgreSQL)]
+    DB --> Outbox[Outbox Publisher]
+    Outbox --> Requested[Kafka requested topic]
+    Requested --> Processor[Transaction Processor]
+    Processor --> Provider[Payment Provider Simulator]
+    Processor --> Status[Kafka status topic]
+    Status --> API
+
+    Requested -. transient failure .-> Retry[Kafka retry topics]
+    Retry --> Processor
+    Retry -. attempts exhausted .-> DLT[Dead-letter topic]
+```
+
+PostgreSQL is the source of record. The transactional outbox prevents lost events across the database/Kafka boundary, while idempotency, retry topics, and dead-letter handling make at-least-once processing safe.
+
 ## What exists in this skeleton
 
 - `transaction-api`: accepts idempotent transaction requests, owns authoritative state, records status history, and writes an outbox event in the same database transaction.
