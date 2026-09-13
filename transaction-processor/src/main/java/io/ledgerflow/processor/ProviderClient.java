@@ -1,6 +1,7 @@
 package io.ledgerflow.processor;
 
 import io.ledgerflow.contracts.*;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
@@ -12,6 +13,7 @@ public class ProviderClient {
         this.restClient = restClient;
     }
 
+    @CircuitBreaker(name = "paymentProvider")
     public ProviderPaymentResponse process(TransactionRequestedEvent event) {
         return restClient.post()
                 .uri("/provider/payments")

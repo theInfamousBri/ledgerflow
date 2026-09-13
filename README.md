@@ -25,10 +25,10 @@ PostgreSQL is the source of record. The transactional outbox prevents lost event
 ## What exists in this skeleton
 
 - `transaction-api`: accepts idempotent transaction requests, owns authoritative state, records status history, and writes an outbox event in the same database transaction.
-- `transaction-processor`: consumes requested events, calls an idempotent provider API, and emits processing/result events.
+- `transaction-processor`: consumes requested events, protects its idempotent provider call with retries and a circuit breaker, and emits processing/result events.
 - `payment-provider-simulator`: deterministic idempotent stand-in for an unreliable downstream provider.
 - `transaction-contracts`: versioned event and provider DTOs shared during the first development phase.
-- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete lifecycle, concurrent idempotency, Kafka redelivery, retries, timeouts, and dead-letter handling.
+- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete lifecycle, concurrent idempotency, Kafka redelivery, retries, timeouts, circuit breaking, and dead-letter handling.
 - `docs`: technical specification, architecture, and ADRs.
 
 PostgreSQL is the source of record. Redis is deliberately deferred until a measured caching or coordination use case exists.
@@ -86,10 +86,9 @@ See [the testing guide](docs/testing.md) for the end-to-end topology and debuggi
 
 ## Delivery roadmap
 
-1. Add circuit-breaker behavior and recovery coverage.
-2. Add reconciliation and outbox cleanup/monitoring.
-3. Add Redis only for justified acceleration or coordination.
-4. Add OpenTelemetry, Prometheus, Grafana, and trace examples.
-5. Add Kubernetes manifests, IaC, and measured load tests.
+1. Add reconciliation and outbox cleanup/monitoring.
+2. Add Redis only for justified acceleration or coordination.
+3. Add OpenTelemetry, Prometheus, Grafana, and trace examples.
+4. Add Kubernetes manifests, IaC, and measured load tests.
 
 See [the technical specification](docs/technical-specification.md) for the precise contracts and invariants.
