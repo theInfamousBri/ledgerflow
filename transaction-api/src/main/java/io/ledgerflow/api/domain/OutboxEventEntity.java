@@ -36,4 +36,3 @@ public class OutboxEventEntity {
     public String getTopic() { return topic; }
     public String getPayload() { return payload; }
 }
-

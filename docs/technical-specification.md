@@ -115,6 +115,8 @@ Append-only history with transaction ID, state, reason, event ID, and occurrence
 
 Created atomically with the transaction. A scheduled publisher sends unpublished rows and marks them published only after broker acknowledgement. A crash after broker acknowledgement but before the mark can republish, so downstream consumers remain idempotent.
 
+Published rows are retained for seven days by default, then removed in configurable batches using `FOR UPDATE SKIP LOCKED`. Cleanup never selects unpublished rows. A partial index on `published_at` supports retention scans without increasing the write cost of pending-row lookups.
+
 ## 7. Correctness invariants
 
 1. One idempotency key identifies at most one transaction.
@@ -124,6 +126,7 @@ Created atomically with the transaction. A scheduled publisher sends unpublished
 5. Every accepted state transition creates exactly one history row per event ID.
 6. Terminal transaction states are immutable.
 7. Provider retries use the same provider idempotency identifier.
+8. Outbox retention cleanup never deletes an unpublished event.
 
 ## 8. Failure behavior
 
@@ -132,6 +135,7 @@ Created atomically with the transaction. A scheduled publisher sends unpublished
 | API process fails before commit | no transaction exists; client safely retries |
 | API process fails after commit | client retry returns existing transaction |
 | Kafka unavailable | outbox remains pending; publisher retries |
+| outbox cleanup fails | published rows remain; the next scheduled batch retries cleanup |
 | requested event redelivered | provider idempotency prevents duplicate effect |
 | provider timeout/5xx | exponential retry; then DLT |
 | result event redelivered | event ID uniqueness makes application a no-op |
@@ -150,14 +154,14 @@ Created atomically with the transaction. A scheduled publisher sends unpublished
 
 Every request/event carries W3C trace context when OpenTelemetry is added. Initial logs include transaction ID, event ID, and trace ID as structured fields. Actuator exposes liveness/readiness and Micrometer metrics.
 
-Required future dashboards: API latency/error rate; outbox age/backlog; Kafka consumer lag; provider latency/failure/circuit state; transitions by result; reconciliation repairs.
+Current outbox signals include unpublished backlog, oldest-pending-event age, publication successes/failures, cleanup deletions, and metric-refresh failures. Future dashboards add API latency/error rate, Kafka consumer lag, provider latency/failure/circuit state, transitions by result, and reconciliation repairs.
 
 ## 11. Acceptance tests by milestone
 
 The MVP end-to-end Testcontainers test proves POST → outbox → Kafka → processor → provider → result event → COMPLETED, verifies ordered history and the published outbox row, and confirms that an identical idempotent replay returns the original resource.
 
-The end-to-end suite covers concurrent duplicate submissions, requested-event redelivery, successful recovery after transient provider failures and ambiguous provider timeouts, exponential backoff, exhausted-retry DLT routing, and terminal failure handling. Further hardening adds tests for key/payload conflict, Kafka outage recovery, outbox duplicate publication, illegal transitions, and stuck-state reconciliation.
+The end-to-end suite covers concurrent duplicate submissions, requested-event redelivery, successful recovery after transient provider failures and ambiguous provider timeouts, exponential backoff, circuit opening/recovery, exhausted-retry DLT routing, terminal failure handling, and published-event retention cleanup. Further hardening adds tests for key/payload conflict, Kafka outage recovery, outbox duplicate publication, illegal transitions, and stuck-state reconciliation.
 
 ## 12. Explicit deferrals
 
-Redis, circuit breaking, reconciliation, OpenTelemetry collector/dashboard stack, Kubernetes, AWS, CI/CD, and load tests are planned but are not represented as complete in this first repository skeleton.
+Redis, reconciliation, the OpenTelemetry collector/dashboard stack, Kubernetes, AWS deployment, and load tests remain planned.

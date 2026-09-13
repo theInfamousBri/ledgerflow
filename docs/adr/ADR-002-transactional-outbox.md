@@ -12,5 +12,5 @@ Saving to PostgreSQL and publishing to Kafka are a dual write. Direct publish af
 
 ## Consequences
 
-Creation is eventually consistent and outbox operation must be monitored. Duplicate publication remains possible, so consumers must be idempotent.
+Creation is eventually consistent and outbox operation must be monitored. Duplicate publication remains possible, so consumers must be idempotent. Published-event retention and operational metrics are defined in [ADR-007](ADR-007-outbox-retention-and-monitoring.md).
 

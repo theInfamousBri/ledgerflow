@@ -24,6 +24,15 @@ spring:
   mvc:
     problemdetails:
       enabled: true
+ledgerflow:
+  outbox:
+    publish-delay-ms: ${OUTBOX_PUBLISH_DELAY_MS:500}
+    retention: ${OUTBOX_RETENTION:7d}
+    cleanup-batch-size: ${OUTBOX_CLEANUP_BATCH_SIZE:1000}
+    cleanup-delay: ${OUTBOX_CLEANUP_DELAY:1h}
+    cleanup-initial-delay: ${OUTBOX_CLEANUP_INITIAL_DELAY:1m}
+    metrics-refresh-delay: ${OUTBOX_METRICS_REFRESH_DELAY:15s}
+    metrics-initial-delay: ${OUTBOX_METRICS_INITIAL_DELAY:5s}
 management:
   endpoints:
     web:

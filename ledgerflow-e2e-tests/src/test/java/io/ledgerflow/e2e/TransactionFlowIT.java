@@ -6,11 +6,13 @@ import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.ledgerflow.api.TransactionApiApplication;
+import io.ledgerflow.api.messaging.OutboxMaintenance;
 import io.ledgerflow.contracts.TransactionRequestedEvent;
 import io.ledgerflow.contracts.TransactionType;
 import io.ledgerflow.processor.ProviderClient;
 import io.ledgerflow.processor.TransactionProcessorApplication;
 import io.ledgerflow.provider.PaymentProviderSimulatorApplication;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -134,7 +136,9 @@ class TransactionFlowIT {
                 "--spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer",
                 "--spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer",
                 "--spring.kafka.consumer.auto-offset-reset=earliest",
-                "--ledgerflow.outbox.publish-delay-ms=50");
+                "--ledgerflow.outbox.publish-delay-ms=50",
+                "--ledgerflow.outbox.cleanup-initial-delay=1h",
+                "--ledgerflow.outbox.metrics-initial-delay=1h");
         apiBaseUrl = "http://localhost:" + localPort(apiContext);
     }
 
@@ -436,6 +440,35 @@ class TransactionFlowIT {
         assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.CLOSED);
     }
 
+    @Test
+    void removesExpiredPublishedOutboxEventWithoutDeletingTransaction() throws Exception {
+        String idempotencyKey = "e2e-outbox-cleanup-" + UUID.randomUUID();
+        String requestBody = """
+                {
+                  "accountId": "acct-outbox-cleanup",
+                  "amount": 24.60,
+                  "currency": "USD",
+                  "type": "PAYMENT"
+                }
+                """;
+
+        var created = postTransaction(idempotencyKey, requestBody);
+        assertThat(created.statusCode()).isEqualTo(202);
+        UUID transactionId = UUID.fromString(JSON.readTree(created.body()).path("id").asText());
+        awaitCompleted(transactionId.toString());
+        assertDatabaseState(idempotencyKey, transactionId);
+        agePublishedOutboxEvent(transactionId);
+
+        MeterRegistry registry = apiContext.getBean(MeterRegistry.class);
+        double deletedBefore = registry.get("ledgerflow.outbox.cleanup.deleted").counter().count();
+        int deleted = apiContext.getBean(OutboxMaintenance.class).cleanupPublishedEvents();
+
+        assertThat(deleted).isEqualTo(1);
+        assertThat(registry.get("ledgerflow.outbox.cleanup.deleted").counter().count())
+                .isEqualTo(deletedBefore + 1);
+        assertTransactionRetainedWithoutOutbox(idempotencyKey, transactionId);
+    }
+
     private static ConfigurableApplicationContext start(Class<?> application, String... properties) {
         String[] arguments = new String[properties.length + 2];
         arguments[0] = "--spring.config.name=ledgerflow-e2e";
@@ -625,6 +658,42 @@ class TransactionFlowIT {
                     assertThat(result.next()).isTrue();
                     assertThat(result.getInt(1)).isEqualTo(1);
                     assertThat(result.getInt(2)).isEqualTo(1);
+                }
+            }
+        }
+    }
+
+    private static void agePublishedOutboxEvent(UUID transactionId) throws Exception {
+        try (var connection = DriverManager.getConnection(jdbcUrl(), DATABASE_USERNAME, DATABASE_PASSWORD);
+             var statement = connection.prepareStatement(
+                     """
+                     UPDATE outbox_events
+                     SET published_at = CURRENT_TIMESTAMP - INTERVAL '8 days'
+                     WHERE aggregate_id = ?
+                     """)) {
+            statement.setObject(1, transactionId);
+            assertThat(statement.executeUpdate()).isEqualTo(1);
+        }
+    }
+
+    private static void assertTransactionRetainedWithoutOutbox(
+            String idempotencyKey, UUID transactionId) throws Exception {
+        try (var connection = DriverManager.getConnection(jdbcUrl(), DATABASE_USERNAME, DATABASE_PASSWORD)) {
+            try (var statement = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM transactions WHERE idempotency_key = ? AND id = ?")) {
+                statement.setString(1, idempotencyKey);
+                statement.setObject(2, transactionId);
+                try (var result = statement.executeQuery()) {
+                    assertThat(result.next()).isTrue();
+                    assertThat(result.getInt(1)).isEqualTo(1);
+                }
+            }
+            try (var statement = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM outbox_events WHERE aggregate_id = ?")) {
+                statement.setObject(1, transactionId);
+                try (var result = statement.executeQuery()) {
+                    assertThat(result.next()).isTrue();
+                    assertThat(result.getInt(1)).isZero();
                 }
             }
         }

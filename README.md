@@ -2,12 +2,21 @@
 
 LedgerFlow is a production-minded transaction-processing platform built to demonstrate reliable asynchronous backend design with Java 21, Spring Boot, Kafka, and PostgreSQL.
 
+## What exists in this skeleton
+
+- `transaction-api`: accepts idempotent transaction requests, owns authoritative state, records status history, writes an outbox event atomically, and operates its publication backlog.
+- `transaction-processor`: consumes requested events, protects its idempotent provider call with retries and a circuit breaker, and emits processing/result events.
+- `payment-provider-simulator`: deterministic idempotent stand-in for an unreliable downstream provider.
+- `transaction-contracts`: versioned event and provider DTOs shared during the first development phase.
+- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete lifecycle, concurrent idempotency, Kafka redelivery, retries, timeouts, circuit breaking, and dead-letter handling.
+- `docs`: technical specification, architecture, and ADRs.
+
 ## Architecture
 
 ```mermaid
 flowchart TD
     Client["Client"] --> API["Transaction API"]
-    API --> Database[(PostgreSQL)]
+    API --> Database[("PostgreSQL")]
     Database --> Publisher["Outbox Publisher"]
     Publisher --> Requested["Kafka requested topic"]
     Requested --> Processor["Transaction Processor"]
@@ -28,18 +37,9 @@ flowchart TD
     Exhausted --> DLT["Dead-letter topic"]
 ```
 
-PostgreSQL is the source of record. The transactional outbox prevents lost events across the database/Kafka boundary, while idempotency, retry topics, circuit breaking, and dead-letter handling make at-least-once processing safe.
-
-## What exists in this skeleton
-
-- `transaction-api`: accepts idempotent transaction requests, owns authoritative state, records status history, and writes an outbox event in the same database transaction.
-- `transaction-processor`: consumes requested events, protects its idempotent provider call with retries and a circuit breaker, and emits processing/result events.
-- `payment-provider-simulator`: deterministic idempotent stand-in for an unreliable downstream provider.
-- `transaction-contracts`: versioned event and provider DTOs shared during the first development phase.
-- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete lifecycle, concurrent idempotency, Kafka redelivery, retries, timeouts, circuit breaking, and dead-letter handling.
-- `docs`: technical specification, architecture, and ADRs.
-
 PostgreSQL is the source of record. Redis is deliberately deferred until a measured caching or coordination use case exists.
+
+The transactional outbox prevents lost events across the database/Kafka boundary, while idempotency, retry topics, circuit breaking, and dead-letter handling make at-least-once processing safe.
 
 ## Local prerequisites
 
@@ -70,6 +70,19 @@ curl http://localhost:8080/transactions/{transactionId}
 
 Health endpoints are available at `/actuator/health` on ports 8080, 8081, and 8082.
 
+Outbox metrics are available through the transaction API's Actuator metrics and Prometheus endpoints:
+
+- `ledgerflow.outbox.pending`
+- `ledgerflow.outbox.oldest.pending.age`
+- `ledgerflow.outbox.publish.success`
+- `ledgerflow.outbox.publish.failure`
+- `ledgerflow.outbox.cleanup.deleted`
+- `ledgerflow.outbox.metrics.refresh.failure`
+
+Published outbox events are retained for seven days by default and then removed in bounded, concurrency-safe batches. Unpublished events are never eligible for cleanup.
+
+See [the operations guide](docs/operations.md) for signal interpretation and configuration.
+
 ## Build
 
 Linux/macOS:
@@ -94,7 +107,7 @@ See [the testing guide](docs/testing.md) for the end-to-end topology and debuggi
 
 ## Delivery roadmap
 
-1. Add reconciliation and outbox cleanup/monitoring.
+1. Add stuck-transaction reconciliation and repair coverage.
 2. Add Redis only for justified acceleration or coordination.
 3. Add OpenTelemetry, Prometheus, Grafana, and trace examples.
 4. Add Kubernetes manifests, IaC, and measured load tests.

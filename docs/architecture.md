@@ -39,6 +39,8 @@ Transient processing failures move through non-blocking Kafka retry topics with 
 
 Provider HTTP calls use bounded connect and read timeouts. Because a timeout leaves the downstream outcome unknown, every retry reuses the transaction ID and can recover a provider decision completed after an earlier client timeout. See [ADR-006](adr/ADR-006-provider-timeout-semantics.md).
 
+Published outbox rows are retained for a configurable period and then removed in bounded batches. Cleanup locks only its selected rows and skips rows already locked by another application instance. Backlog size, oldest-pending-event age, publish outcomes, and cleanup throughput are exposed as Micrometer metrics. See [ADR-007](adr/ADR-007-outbox-retention-and-monitoring.md).
+
 ## Provider sequence
 
 ```mermaid
