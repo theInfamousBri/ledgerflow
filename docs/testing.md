@@ -32,12 +32,16 @@ The tests verify:
 15. Four consecutive provider failures exhaust the configured processing attempts and place the original requested event on the dead-letter topic.
 16. The DLT handler transitions the authoritative transaction to `FAILED` with failure code `RETRIES_EXHAUSTED`.
 17. Permanent failure retains exactly `PENDING → PROCESSING → FAILED` history and no provider reference.
+18. A provider operation that exceeds the client read timeout causes two timed-out attempts before a later retry retrieves the stored provider decision.
+19. Timeout recovery uses one provider reference, reaches `COMPLETED`, and retains exactly `PENDING → PROCESSING → COMPLETED` history.
 
 The redelivery scenario intentionally does not claim exactly-once execution. The processor can call an external dependency again after Kafka redelivery. LedgerFlow instead requires an idempotent provider contract and idempotent state application so the repeated attempt cannot create a second payment effect or corrupt transaction history.
 
 The provider's fail-first control is deterministic and one-shot. This keeps retry tests repeatable while leaving the random failure-rate option available for exploratory local testing.
 
 The dead-letter assertion uses a separate Kafka consumer group with `earliest` offset behavior. This verifies the retained DLT key and payload independently of the application's DLT handler.
+
+The E2E processor uses a 250-millisecond provider read timeout, while the delayed simulator operation takes 1.5 seconds. This produces real client timeouts quickly; production defaults remain one second for connect and two seconds for read.
 
 ## Commands
 

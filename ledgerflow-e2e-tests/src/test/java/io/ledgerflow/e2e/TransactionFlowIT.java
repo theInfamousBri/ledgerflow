@@ -99,7 +99,8 @@ class TransactionFlowIT {
                 "--spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer",
                 "--spring.kafka.consumer.auto-offset-reset=earliest",
                 "--spring.kafka.consumer.enable-auto-commit=false",
-                "--ledgerflow.provider.base-url=" + providerBaseUrl);
+                "--ledgerflow.provider.base-url=" + providerBaseUrl,
+                "--ledgerflow.provider.read-timeout=250ms");
 
         apiContext = start(TransactionApiApplication.class,
                 "--spring.application.name=e2e-api",
@@ -295,10 +296,7 @@ class TransactionFlowIT {
         assertThat(providerPayment.path("decision").path("providerReference").asText())
                 .isEqualTo(completed.path("providerReference").asText());
 
-        List<Instant> attemptTimes = StreamSupport.stream(
-                        providerPayment.path("attemptedAt").spliterator(), false)
-                .map(item -> Instant.parse(item.asText()))
-                .toList();
+        List<Instant> attemptTimes = providerAttemptTimes(providerPayment);
         assertThat(attemptTimes).hasSize(3);
         long firstBackoffMillis = Duration.between(attemptTimes.get(0), attemptTimes.get(1)).toMillis();
         long secondBackoffMillis = Duration.between(attemptTimes.get(1), attemptTimes.get(2)).toMillis();
@@ -340,6 +338,40 @@ class TransactionFlowIT {
         assertThat(failed.path("providerReference").isNull()).isTrue();
         assertThat(failed.path("failureCode").asText()).isEqualTo("RETRIES_EXHAUSTED");
         assertThat(statuses(failed)).containsExactly("PENDING", "PROCESSING", "FAILED");
+        assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
+    }
+
+    @Test
+    void recoversProviderDecisionAfterAmbiguousTimeouts() throws Exception {
+        configureNextProviderDelay(1_500);
+        String idempotencyKey = "e2e-timeout-" + UUID.randomUUID();
+        String requestBody = """
+                {
+                  "accountId": "acct-timeout",
+                  "amount": 57.30,
+                  "currency": "USD",
+                  "type": "PAYMENT"
+                }
+                """;
+
+        var created = postTransaction(idempotencyKey, requestBody);
+        assertThat(created.statusCode()).isEqualTo(202);
+        String transactionId = JSON.readTree(created.body()).path("id").asText();
+
+        JsonNode completed = awaitCompleted(transactionId);
+        JsonNode providerPayment = awaitProviderRequestCount(transactionId, 3);
+        assertThat(providerPayment.path("decision").path("providerReference").asText())
+                .isEqualTo(completed.path("providerReference").asText());
+
+        List<Instant> attemptTimes = providerAttemptTimes(providerPayment);
+        assertThat(attemptTimes).hasSize(3);
+        assertThat(Duration.between(attemptTimes.get(0), attemptTimes.get(1)).toMillis())
+                .isGreaterThanOrEqualTo(650);
+        assertThat(Duration.between(attemptTimes.get(1), attemptTimes.get(2)).toMillis())
+                .isGreaterThanOrEqualTo(1_150);
+
+        assertThat(completed.path("failureCode").isNull()).isTrue();
+        assertThat(statuses(completed)).containsExactly("PENDING", "PROCESSING", "COMPLETED");
         assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
     }
 
@@ -387,6 +419,16 @@ class TransactionFlowIT {
     private static void configureNextProviderFailures(int attempts) throws Exception {
         var request = HttpRequest.newBuilder(URI.create(
                         providerBaseUrl + "/provider/payments/simulation/fail-next?attempts=" + attempts))
+                .timeout(Duration.ofSeconds(5))
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        var response = HTTP.send(request, HttpResponse.BodyHandlers.discarding());
+        assertThat(response.statusCode()).isEqualTo(204);
+    }
+
+    private static void configureNextProviderDelay(long milliseconds) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create(
+                        providerBaseUrl + "/provider/payments/simulation/delay-next?milliseconds=" + milliseconds))
                 .timeout(Duration.ofSeconds(5))
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build();
@@ -444,6 +486,12 @@ class TransactionFlowIT {
                     providerPayment[0] = body;
                 });
         return providerPayment[0];
+    }
+
+    private static List<Instant> providerAttemptTimes(JsonNode providerPayment) {
+        return StreamSupport.stream(providerPayment.path("attemptedAt").spliterator(), false)
+                .map(item -> Instant.parse(item.asText()))
+                .toList();
     }
 
     private static String requestedEventPayload(UUID transactionId) throws Exception {
