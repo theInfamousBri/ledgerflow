@@ -39,6 +39,9 @@ The tests verify:
 22. A successful half-open probe closes the circuit and preserves the provider's idempotent response.
 23. Retention cleanup deletes an expired published outbox event while preserving its authoritative transaction.
 24. Cleanup increments its Micrometer deletion counter by the number of rows removed.
+25. A completed provider decision can repair a transaction whose terminal status was lost and whose authoritative state remains `PROCESSING`.
+26. Reconciliation uses the provider's read-only lookup, preserves the original provider reference, and does not create another provider attempt.
+27. Reconciliation writes one published outbox request, increments its request/attempt metrics, and retains exactly `PENDING → PROCESSING → COMPLETED` history.
 
 The redelivery scenario intentionally does not claim exactly-once execution. The processor can call an external dependency again after Kafka redelivery. LedgerFlow instead requires an idempotent provider contract and idempotent state application so the repeated attempt cannot create a second payment effect or corrupt transaction history.
 
@@ -51,6 +54,8 @@ The E2E processor uses a 250-millisecond provider read timeout, while the delaye
 Circuit-breaker state is reset before each scenario so retry, DLT, timeout, and circuit-transition assertions cannot influence one another. The circuit scenario uses a four-call test window for speed; the processor's production configuration uses a 20-call window, a minimum of 10 calls, and a 50% failure-rate threshold.
 
 The cleanup scenario first confirms the event was published, moves only that row beyond the seven-day retention window, and invokes one maintenance batch. Recent published events and all unpublished events remain ineligible. Unit coverage verifies the bounded cutoff calculation plus scheduled backlog and oldest-age metric snapshots.
+
+The reconciliation scenario first completes a real provider operation, then constructs the precise database state produced if its terminal status were lost. A bounded scan writes a reconciliation request through the outbox, the processor retrieves the existing decision without another provider mutation, and the normal status consumer repairs authoritative state. Unit coverage separately proves unresolved lookups emit no status event.
 
 ## Commands
 

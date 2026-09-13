@@ -33,6 +33,12 @@ ledgerflow:
     cleanup-initial-delay: ${OUTBOX_CLEANUP_INITIAL_DELAY:1m}
     metrics-refresh-delay: ${OUTBOX_METRICS_REFRESH_DELAY:15s}
     metrics-initial-delay: ${OUTBOX_METRICS_INITIAL_DELAY:5s}
+  reconciliation:
+    stale-after: ${RECONCILIATION_STALE_AFTER:2m}
+    retry-delay: ${RECONCILIATION_RETRY_DELAY:5m}
+    batch-size: ${RECONCILIATION_BATCH_SIZE:100}
+    scan-delay: ${RECONCILIATION_SCAN_DELAY:30s}
+    initial-delay: ${RECONCILIATION_INITIAL_DELAY:30s}
 management:
   endpoints:
     web:
@@ -42,4 +48,3 @@ management:
     health:
       probes:
         enabled: true
-

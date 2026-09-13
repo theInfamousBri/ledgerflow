@@ -4,8 +4,8 @@ LedgerFlow is a production-minded transaction-processing platform built to demon
 
 ## What exists in this skeleton
 
-- `transaction-api`: accepts idempotent transaction requests, owns authoritative state, records status history, writes an outbox event atomically, and operates its publication backlog.
-- `transaction-processor`: consumes requested events, protects its idempotent provider call with retries and a circuit breaker, and emits processing/result events.
+- `transaction-api`: accepts idempotent transaction requests, owns authoritative state, records status history, operates its publication backlog, and queues stale transactions for reconciliation.
+- `transaction-processor`: consumes processing and reconciliation requests, protects provider calls with retries and a circuit breaker, and emits processing/result events.
 - `payment-provider-simulator`: deterministic idempotent stand-in for an unreliable downstream provider.
 - `transaction-contracts`: versioned event and provider DTOs shared during the first development phase.
 - `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete lifecycle, concurrent idempotency, Kafka redelivery, retries, timeouts, circuit breaking, and dead-letter handling.
@@ -35,6 +35,18 @@ flowchart TD
     NextAttempt --> Success["Status event"]
     NextAttempt --> Exhausted["Attempts exhausted"]
     Exhausted --> DLT["Dead-letter topic"]
+```
+
+Stuck transactions follow the same outbox and status-event boundaries:
+
+```mermaid
+flowchart TD
+    Scanner["Stale transaction scanner"] --> Outbox["Transactional outbox"]
+    Outbox --> Topic["Kafka reconciliation topic"]
+    Topic --> Processor["Transaction Processor"]
+    Processor --> Lookup["Provider decision lookup"]
+    Lookup --> Status["Kafka status topic"]
+    Status --> API["Transaction API"]
 ```
 
 PostgreSQL is the source of record. Redis is deliberately deferred until a measured caching or coordination use case exists.
@@ -78,6 +90,11 @@ Outbox metrics are available through the transaction API's Actuator metrics and 
 - `ledgerflow.outbox.publish.failure`
 - `ledgerflow.outbox.cleanup.deleted`
 - `ledgerflow.outbox.metrics.refresh.failure`
+- `ledgerflow.reconciliation.scan`
+- `ledgerflow.reconciliation.requested`
+- `ledgerflow.reconciliation.resolved`
+- `ledgerflow.reconciliation.unresolved`
+- `ledgerflow.reconciliation.failure`
 
 Published outbox events are retained for seven days by default and then removed in bounded, concurrency-safe batches. Unpublished events are never eligible for cleanup.
 
@@ -107,9 +124,8 @@ See [the testing guide](docs/testing.md) for the end-to-end topology and debuggi
 
 ## Delivery roadmap
 
-1. Add stuck-transaction reconciliation and repair coverage.
-2. Add Redis only for justified acceleration or coordination.
-3. Add OpenTelemetry, Prometheus, Grafana, and trace examples.
-4. Add Kubernetes manifests, IaC, and measured load tests.
+1. Add Redis only for justified acceleration or coordination.
+2. Add OpenTelemetry, Prometheus, Grafana, and trace examples.
+3. Add Kubernetes manifests, IaC, and measured load tests.
 
 See [the technical specification](docs/technical-specification.md) for the precise contracts and invariants.
