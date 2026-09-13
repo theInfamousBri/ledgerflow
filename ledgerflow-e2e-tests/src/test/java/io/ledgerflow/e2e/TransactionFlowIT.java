@@ -2,7 +2,13 @@ package io.ledgerflow.e2e;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.ledgerflow.api.TransactionApiApplication;
+import io.ledgerflow.contracts.TransactionRequestedEvent;
+import io.ledgerflow.contracts.TransactionType;
+import io.ledgerflow.processor.ProviderClient;
 import io.ledgerflow.processor.TransactionProcessorApplication;
 import io.ledgerflow.provider.PaymentProviderSimulatorApplication;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -11,11 +17,13 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.Banner;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.web.client.HttpServerErrorException;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -27,6 +35,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.DriverManager;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -40,6 +49,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.StreamSupport;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 @Testcontainers
@@ -100,7 +110,14 @@ class TransactionFlowIT {
                 "--spring.kafka.consumer.auto-offset-reset=earliest",
                 "--spring.kafka.consumer.enable-auto-commit=false",
                 "--ledgerflow.provider.base-url=" + providerBaseUrl,
-                "--ledgerflow.provider.read-timeout=250ms");
+                "--ledgerflow.provider.read-timeout=250ms",
+                "--resilience4j.circuitbreaker.instances.paymentProvider.sliding-window-type=COUNT_BASED",
+                "--resilience4j.circuitbreaker.instances.paymentProvider.sliding-window-size=4",
+                "--resilience4j.circuitbreaker.instances.paymentProvider.minimum-number-of-calls=4",
+                "--resilience4j.circuitbreaker.instances.paymentProvider.failure-rate-threshold=100",
+                "--resilience4j.circuitbreaker.instances.paymentProvider.wait-duration-in-open-state=30s",
+                "--resilience4j.circuitbreaker.instances.paymentProvider.permitted-number-of-calls-in-half-open-state=1",
+                "--resilience4j.circuitbreaker.instances.paymentProvider.automatic-transition-from-open-to-half-open-enabled=false");
 
         apiContext = start(TransactionApiApplication.class,
                 "--spring.application.name=e2e-api",
@@ -119,6 +136,11 @@ class TransactionFlowIT {
                 "--spring.kafka.consumer.auto-offset-reset=earliest",
                 "--ledgerflow.outbox.publish-delay-ms=50");
         apiBaseUrl = "http://localhost:" + localPort(apiContext);
+    }
+
+    @BeforeEach
+    void resetPaymentProviderCircuitBreaker() {
+        paymentProviderCircuitBreaker().reset();
     }
 
     @AfterAll
@@ -375,6 +397,45 @@ class TransactionFlowIT {
         assertDatabaseState(idempotencyKey, UUID.fromString(transactionId));
     }
 
+    @Test
+    void opensCircuitWithoutCallingProviderAndClosesAfterSuccessfulProbe() throws Exception {
+        configureNextProviderFailures(4);
+        UUID transactionId = UUID.randomUUID();
+        var event = new TransactionRequestedEvent(
+                UUID.randomUUID(),
+                1,
+                transactionId,
+                "acct-circuit-breaker",
+                new BigDecimal("38.40"),
+                "USD",
+                TransactionType.PAYMENT,
+                "e2e-circuit-breaker-" + transactionId,
+                Instant.now());
+        ProviderClient providerClient = processorContext.getBean(ProviderClient.class);
+        CircuitBreaker circuitBreaker = paymentProviderCircuitBreaker();
+
+        for (int attempt = 0; attempt < 4; attempt++) {
+            assertThatThrownBy(() -> providerClient.process(event))
+                    .isInstanceOf(HttpServerErrorException.class);
+        }
+
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.OPEN);
+        assertThatThrownBy(() -> providerClient.process(event))
+                .isInstanceOf(CallNotPermittedException.class);
+        assertThat(awaitProviderRequestCount(transactionId.toString(), 4).path("requestCount").asInt())
+                .isEqualTo(4);
+
+        circuitBreaker.transitionToHalfOpenState();
+        var recovered = providerClient.process(event);
+
+        assertThat(recovered.approved()).isTrue();
+        assertThat(recovered.providerReference()).startsWith("sim-");
+        assertThat(awaitProviderRequestCount(transactionId.toString(), 5)
+                .path("decision").path("providerReference").asText())
+                .isEqualTo(recovered.providerReference());
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.CLOSED);
+    }
+
     private static ConfigurableApplicationContext start(Class<?> application, String... properties) {
         String[] arguments = new String[properties.length + 2];
         arguments[0] = "--spring.config.name=ledgerflow-e2e";
@@ -486,6 +547,11 @@ class TransactionFlowIT {
                     providerPayment[0] = body;
                 });
         return providerPayment[0];
+    }
+
+    private static CircuitBreaker paymentProviderCircuitBreaker() {
+        return processorContext.getBean(CircuitBreakerRegistry.class)
+                .circuitBreaker("paymentProvider");
     }
 
     private static List<Instant> providerAttemptTimes(JsonNode providerPayment) {

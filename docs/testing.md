@@ -34,6 +34,9 @@ The tests verify:
 17. Permanent failure retains exactly `PENDING → PROCESSING → FAILED` history and no provider reference.
 18. A provider operation that exceeds the client read timeout causes two timed-out attempts before a later retry retrieves the stored provider decision.
 19. Timeout recovery uses one provider reference, reaches `COMPLETED`, and retains exactly `PENDING → PROCESSING → COMPLETED` history.
+20. Four counted provider failures open the payment-provider circuit breaker.
+21. A call made while the circuit is open fails fast without reaching the provider.
+22. A successful half-open probe closes the circuit and preserves the provider's idempotent response.
 
 The redelivery scenario intentionally does not claim exactly-once execution. The processor can call an external dependency again after Kafka redelivery. LedgerFlow instead requires an idempotent provider contract and idempotent state application so the repeated attempt cannot create a second payment effect or corrupt transaction history.
 
@@ -42,6 +45,8 @@ The provider's fail-first control is deterministic and one-shot. This keeps retr
 The dead-letter assertion uses a separate Kafka consumer group with `earliest` offset behavior. This verifies the retained DLT key and payload independently of the application's DLT handler.
 
 The E2E processor uses a 250-millisecond provider read timeout, while the delayed simulator operation takes 1.5 seconds. This produces real client timeouts quickly; production defaults remain one second for connect and two seconds for read.
+
+Circuit-breaker state is reset before each scenario so retry, DLT, timeout, and circuit-transition assertions cannot influence one another. The circuit scenario uses a four-call test window for speed; the processor's production configuration uses a 20-call window, a minimum of 10 calls, and a 50% failure-rate threshold.
 
 ## Commands
 
