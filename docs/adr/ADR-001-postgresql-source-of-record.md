@@ -12,5 +12,5 @@ The system requires uniqueness, atomic multi-row writes, constraints, and durabl
 
 ## Consequences
 
-All state mutations route through the transaction API. Redis may later accelerate reads but cannot decide whether a duplicate transaction exists.
+All state mutations route through the transaction API. Redis accelerates retrieval reads but cannot decide whether a duplicate transaction exists or whether a state transition is valid.
 

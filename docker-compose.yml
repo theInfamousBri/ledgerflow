@@ -32,6 +32,17 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
 
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   transaction-api:
     build:
       context: .
@@ -41,11 +52,17 @@ services:
       DB_USERNAME: ${POSTGRES_USER:-ledgerflow}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-ledgerflow-local}
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_CONNECT_TIMEOUT: ${REDIS_CONNECT_TIMEOUT:-200ms}
+      REDIS_COMMAND_TIMEOUT: ${REDIS_COMMAND_TIMEOUT:-200ms}
+      TRANSACTION_CACHE_TTL: ${TRANSACTION_CACHE_TTL:-30s}
     ports:
       - "8080:8080"
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_started }
+      redis: { condition: service_healthy }
 
   payment-provider-simulator:
     build:

@@ -26,17 +26,20 @@ public class TransactionService {
     private final OutboxEventRepository outbox;
     private final ObjectMapper objectMapper;
     private final IdempotencyLock idempotencyLock;
+    private final TransactionCache cache;
 
     public TransactionService(TransactionRepository transactions,
                               TransactionStatusHistoryRepository history,
                               OutboxEventRepository outbox,
                               ObjectMapper objectMapper,
-                              IdempotencyLock idempotencyLock) {
+                              IdempotencyLock idempotencyLock,
+                              TransactionCache cache) {
         this.transactions = transactions;
         this.history = history;
         this.outbox = outbox;
         this.objectMapper = objectMapper;
         this.idempotencyLock = idempotencyLock;
+        this.cache = cache;
     }
 
     @Transactional
@@ -68,11 +71,18 @@ public class TransactionService {
 
     @Transactional(readOnly = true)
     public TransactionResponse get(UUID id) {
-        return toResponse(transactions.findById(id).orElseThrow(() -> new TransactionNotFoundException(id)));
+        var cached = cache.get(id);
+        if (cached.isPresent()) return cached.get();
+
+        var response = toResponse(transactions.findById(id)
+                .orElseThrow(() -> new TransactionNotFoundException(id)));
+        cache.put(response);
+        return response;
     }
 
     @Transactional
     public void apply(TransactionStatusChangedEvent event) {
+        cache.evictAfterCommit(event.transactionId());
         if (history.existsByEventId(event.eventId())) return;
         var entity = transactions.findById(event.transactionId())
                 .orElseThrow(() -> new TransactionNotFoundException(event.transactionId()));

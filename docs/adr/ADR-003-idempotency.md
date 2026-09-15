@@ -12,4 +12,4 @@ A cache-only check has race and eviction windows. A database uniqueness constrai
 
 ## Consequences
 
-Duplicate identical requests return the original resource. Duplicate keys with different payloads return `409 Conflict`. Redis is not required for correctness.
+Duplicate identical requests return the original resource. Duplicate keys with different payloads return `409 Conflict`. Redis caches retrieval responses but is not used to decide idempotency and is not required for correctness.

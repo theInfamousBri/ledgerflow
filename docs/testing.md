@@ -5,13 +5,13 @@
 | Layer | Maven phase | Docker | Purpose |
 | --- | --- | --- | --- |
 | Unit | `test` | No | Fast domain and component behavior |
-| End-to-end | `integration-test` / `verify` | Yes | Real PostgreSQL, Kafka, HTTP, and all three applications |
+| End-to-end | `integration-test` / `verify` | Yes | Real PostgreSQL, Kafka, Redis, HTTP, and all three applications |
 
 The `ledgerflow-e2e-tests` module is last in the reactor and uses Maven Failsafe, so its `*IT` tests run during `verify` rather than Surefire's unit-test phase.
 
 ## End-to-end topology
 
-`TransactionFlowIT` starts ephemeral PostgreSQL and Kafka containers on random host ports. It then boots the provider simulator, processor, and transaction API in the test JVM on random web ports. No manually running Compose services or fixed ports are required.
+`TransactionFlowIT` starts ephemeral PostgreSQL, Kafka, and Redis containers on random host ports. It then boots the provider simulator, processor, and transaction API in the test JVM on random web ports. No manually running Compose services or fixed ports are required.
 
 The tests verify:
 
@@ -42,6 +42,9 @@ The tests verify:
 25. A completed provider decision can repair a transaction whose terminal status was lost and whose authoritative state remains `PROCESSING`.
 26. Reconciliation uses the provider's read-only lookup, preserves the original provider reference, and does not create another provider attempt.
 27. Reconciliation writes one published outbox request, increments its request/attempt metrics, and retains exactly `PENDING → PROCESSING → COMPLETED` history.
+28. The first uncached transaction read records a miss and populates Redis with a bounded TTL; the second read records a cache hit.
+29. A committed status transition evicts a deliberately stale cached representation before the next read repopulates it.
+30. Unit coverage proves a Redis connection failure becomes a cache miss and that eviction waits for database commit.
 
 The redelivery scenario intentionally does not claim exactly-once execution. The processor can call an external dependency again after Kafka redelivery. LedgerFlow instead requires an idempotent provider contract and idempotent state application so the repeated attempt cannot create a second payment effect or corrupt transaction history.
 
@@ -77,4 +80,4 @@ Run only the end-to-end module while also building its required service modules:
 .\mvnw.cmd verify -pl ledgerflow-e2e-tests -am
 ```
 
-The first run downloads the Testcontainers dependencies and PostgreSQL/Kafka images. Testcontainers cleans up its ephemeral containers automatically after the test process exits.
+The first run downloads the Testcontainers dependencies and PostgreSQL/Kafka/Redis images. Testcontainers cleans up its ephemeral containers automatically after the test process exits.
