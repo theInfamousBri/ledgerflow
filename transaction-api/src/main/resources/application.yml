@@ -21,6 +21,12 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       auto-offset-reset: earliest
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:200ms}
+      timeout: ${REDIS_COMMAND_TIMEOUT:200ms}
   mvc:
     problemdetails:
       enabled: true
@@ -39,7 +45,12 @@ ledgerflow:
     batch-size: ${RECONCILIATION_BATCH_SIZE:100}
     scan-delay: ${RECONCILIATION_SCAN_DELAY:30s}
     initial-delay: ${RECONCILIATION_INITIAL_DELAY:30s}
+  cache:
+    transaction-ttl: ${TRANSACTION_CACHE_TTL:30s}
 management:
+  health:
+    redis:
+      enabled: false
   endpoints:
     web:
       exposure:

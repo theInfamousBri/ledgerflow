@@ -1,7 +1,7 @@
 # LedgerFlow Technical Specification
 
 Status: initial implementation baseline  
-Target: Java 21, Spring Boot 3.5.x, Kafka, PostgreSQL
+Target: Java 21, Spring Boot 3.5.x, Kafka, PostgreSQL, Redis
 
 ## 1. Purpose and scope
 
@@ -17,6 +17,7 @@ The system demonstrates correctness under duplicate delivery, process restarts, 
 | transaction-processor | provider orchestration and retry policy | authoritative transaction state |
 | payment-provider-simulator | simulated provider decisions keyed by transaction ID | platform transaction lifecycle |
 | PostgreSQL | authoritative transaction and outbox data | ephemeral cache data |
+| Redis | disposable transaction retrieval responses | transaction correctness or durable state |
 | Kafka | asynchronous delivery | source-of-record state |
 
 The transaction API consumes status-change events and alone applies changes to authoritative state. The processor never writes transaction tables directly.
@@ -47,7 +48,7 @@ Rules:
 
 ### GET /transactions/{id}
 
-Returns current state and ordered status history. Unknown IDs return `404`.
+Returns current state and ordered status history. Unknown IDs return `404`. Successful PostgreSQL reads are cached in Redis for 30 seconds by default; cache misses and failures transparently use PostgreSQL.
 
 ```json
 {
@@ -169,4 +170,4 @@ The end-to-end suite covers concurrent duplicate submissions, requested-event re
 
 ## 12. Explicit deferrals
 
-Redis, the OpenTelemetry collector/dashboard stack, Kubernetes, AWS deployment, and load tests remain planned.
+The OpenTelemetry collector/dashboard stack, Kubernetes, AWS deployment, and load tests remain planned. Redis is used only as a non-authoritative transaction read cache; PostgreSQL continues to own all correctness decisions.

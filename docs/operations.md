@@ -15,6 +15,11 @@
 | `ledgerflow.reconciliation.resolved` | Counter | Provider decisions converted into terminal status events |
 | `ledgerflow.reconciliation.unresolved` | Counter | Lookups with no provider record or no completed decision |
 | `ledgerflow.reconciliation.failure` | Counter | Reconciliation messages that exhausted processing retries |
+| `ledgerflow.cache.transaction.hit` | Counter | Transaction reads served from Redis |
+| `ledgerflow.cache.transaction.miss` | Counter | Redis misses followed by an authoritative database lookup |
+| `ledgerflow.cache.transaction.write` | Counter | Database responses successfully cached with a TTL |
+| `ledgerflow.cache.transaction.eviction` | Counter | Cache eviction commands issued after status commits |
+| `ledgerflow.cache.transaction.failure` | Counter | Redis access or cached-payload failures handled by fallback |
 
 Backlog and age should be evaluated together. A brief backlog increase with continuing publication successes is normal under load. A growing oldest-event age, especially alongside publication failures, indicates that accepted transactions are not reaching Kafka.
 
@@ -51,6 +56,20 @@ Never delete unpublished rows to clear an alert. They represent committed work t
 | `OUTBOX_METRICS_INITIAL_DELAY` | `5s` | Startup delay before the first metric snapshot |
 
 Cleanup is deliberately absent from readiness and liveness health. A temporary retention failure should alert operators, not cause an orchestrator to restart an otherwise healthy API instance.
+
+## Transaction read cache
+
+Redis accelerates repeated `GET /transactions/{id}` requests and contains no authoritative data. The API uses 200-millisecond connection and command timeouts by default, falls back to PostgreSQL on any Redis access failure, and does not include Redis in readiness health.
+
+A falling hit ratio may indicate a TTL that is too short for the polling pattern. A rising failure counter should be investigated even while requests succeed, because database load and read latency will increase. Failed evictions and the residual concurrent-read race inherent in cache-aside invalidation are bounded by the TTL; do not extend the TTL without considering the longer stale-read window.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `REDIS_HOST` | `localhost` | Redis host used by the transaction API |
+| `REDIS_PORT` | `6379` | Redis port |
+| `REDIS_CONNECT_TIMEOUT` | `200ms` | Maximum connection establishment time before fallback |
+| `REDIS_COMMAND_TIMEOUT` | `200ms` | Maximum Redis command time before fallback |
+| `TRANSACTION_CACHE_TTL` | `30s` | Maximum lifetime of a cached transaction response |
 
 ## Reconciliation
 

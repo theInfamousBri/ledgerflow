@@ -8,7 +8,11 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.ledgerflow.api.TransactionApiApplication;
 import io.ledgerflow.api.messaging.OutboxMaintenance;
 import io.ledgerflow.api.messaging.ReconciliationScanner;
+import io.ledgerflow.api.service.TransactionCache;
+import io.ledgerflow.api.service.TransactionService;
 import io.ledgerflow.contracts.TransactionRequestedEvent;
+import io.ledgerflow.contracts.TransactionStatus;
+import io.ledgerflow.contracts.TransactionStatusChangedEvent;
 import io.ledgerflow.contracts.TransactionType;
 import io.ledgerflow.processor.ProviderClient;
 import io.ledgerflow.processor.TransactionProcessorApplication;
@@ -26,6 +30,7 @@ import org.springframework.boot.Banner;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.client.HttpServerErrorException;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -77,6 +82,12 @@ class TransactionFlowIT {
 
     @Container
     private static final KafkaContainer KAFKA = new KafkaContainer("apache/kafka:3.9.1");
+
+    @Container
+    private static final GenericContainer<?> REDIS = new GenericContainer<>(
+            DockerImageName.parse("redis:7.4-alpine"))
+            .withCommand("redis-server", "--save", "", "--appendonly", "no")
+            .withExposedPorts(6379);
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final HttpClient HTTP = HttpClient.newBuilder()
@@ -137,6 +148,11 @@ class TransactionFlowIT {
                 "--spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer",
                 "--spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer",
                 "--spring.kafka.consumer.auto-offset-reset=earliest",
+                "--spring.data.redis.host=" + REDIS.getHost(),
+                "--spring.data.redis.port=" + REDIS.getMappedPort(6379),
+                "--spring.data.redis.connect-timeout=200ms",
+                "--spring.data.redis.timeout=200ms",
+                "--ledgerflow.cache.transaction-ttl=30s",
                 "--ledgerflow.outbox.publish-delay-ms=50",
                 "--ledgerflow.outbox.cleanup-initial-delay=1h",
                 "--ledgerflow.outbox.metrics-initial-delay=1h",
@@ -493,6 +509,7 @@ class TransactionFlowIT {
         assertThat(awaitProviderRequestCount(transactionId.toString(), 1).path("requestCount").asInt())
                 .isEqualTo(1);
         simulateLostTerminalStatus(transactionId);
+        transactionCache().evict(transactionId);
 
         MeterRegistry apiMetrics = apiContext.getBean(MeterRegistry.class);
         MeterRegistry processorMetrics = processorContext.getBean(MeterRegistry.class);
@@ -512,6 +529,61 @@ class TransactionFlowIT {
                 .isEqualTo(resolvedBefore + 1);
         assertReconciliationDatabaseState(idempotencyKey, transactionId);
         assertThat(apiContext.getBean(ReconciliationScanner.class).scan()).isZero();
+    }
+
+    @Test
+    void cachesRepeatedTransactionReadsWithBoundedTtl() throws Exception {
+        String idempotencyKey = "e2e-cache-hit-" + UUID.randomUUID();
+        var created = postTransaction(idempotencyKey, requestBody("acct-cache-hit", "31.25"));
+        assertThat(created.statusCode()).isEqualTo(202);
+        UUID transactionId = UUID.fromString(JSON.readTree(created.body()).path("id").asText());
+        awaitCompleted(transactionId.toString());
+
+        TransactionCache cache = transactionCache();
+        StringRedisTemplate redis = redis();
+        MeterRegistry metrics = apiContext.getBean(MeterRegistry.class);
+        cache.evict(transactionId);
+        double missesBefore = metrics.get("ledgerflow.cache.transaction.miss").counter().count();
+        double hitsBefore = metrics.get("ledgerflow.cache.transaction.hit").counter().count();
+
+        var first = getTransaction(transactionId.toString());
+        var second = getTransaction(transactionId.toString());
+
+        assertThat(first.statusCode()).isEqualTo(200);
+        assertThat(second.statusCode()).isEqualTo(200);
+        assertThat(JSON.readTree(second.body()).path("status").asText()).isEqualTo("COMPLETED");
+        assertThat(metrics.get("ledgerflow.cache.transaction.miss").counter().count())
+                .isEqualTo(missesBefore + 1);
+        assertThat(metrics.get("ledgerflow.cache.transaction.hit").counter().count())
+                .isEqualTo(hitsBefore + 1);
+        assertThat(redis.hasKey(cache.key(transactionId))).isTrue();
+        assertThat(redis.getExpire(cache.key(transactionId))).isBetween(1L, 30L);
+    }
+
+    @Test
+    void evictsCachedTransactionOnlyAfterStatusCommit() throws Exception {
+        String idempotencyKey = "e2e-cache-invalidation-" + UUID.randomUUID();
+        var created = postTransaction(idempotencyKey, requestBody("acct-cache-invalidation", "63.80"));
+        assertThat(created.statusCode()).isEqualTo(202);
+        UUID transactionId = UUID.fromString(JSON.readTree(created.body()).path("id").asText());
+        JsonNode originallyCompleted = awaitCompleted(transactionId.toString());
+        String providerReference = originallyCompleted.path("providerReference").asText();
+        TransactionCache cache = transactionCache();
+
+        assertThat(redis().hasKey(cache.key(transactionId))).isTrue();
+        simulateLostTerminalStatus(transactionId);
+        assertThat(JSON.readTree(getTransaction(transactionId.toString()).body()).path("status").asText())
+                .isEqualTo("COMPLETED");
+
+        apiContext.getBean(TransactionService.class).apply(new TransactionStatusChangedEvent(
+                UUID.randomUUID(), 1, transactionId, TransactionStatus.COMPLETED,
+                providerReference, null, "e2e-cache-invalidation", Instant.now()));
+
+        assertThat(redis().hasKey(cache.key(transactionId))).isFalse();
+        JsonNode refreshed = JSON.readTree(getTransaction(transactionId.toString()).body());
+        assertThat(refreshed.path("status").asText()).isEqualTo("COMPLETED");
+        assertThat(refreshed.path("providerReference").asText()).isEqualTo(providerReference);
+        assertThat(statuses(refreshed)).containsExactly("PENDING", "PROCESSING", "COMPLETED");
     }
 
     private static ConfigurableApplicationContext start(Class<?> application, String... properties) {
@@ -573,6 +645,17 @@ class TransactionFlowIT {
                 .build();
         var response = HTTP.send(request, HttpResponse.BodyHandlers.discarding());
         assertThat(response.statusCode()).isEqualTo(204);
+    }
+
+    private static String requestBody(String accountId, String amount) {
+        return """
+                {
+                  "accountId": "%s",
+                  "amount": %s,
+                  "currency": "USD",
+                  "type": "PAYMENT"
+                }
+                """.formatted(accountId, amount);
     }
 
     private static Iterable<String> statuses(JsonNode transaction) {
@@ -682,6 +765,14 @@ class TransactionFlowIT {
     @SuppressWarnings("unchecked")
     private static KafkaTemplate<String, String> kafka() {
         return (KafkaTemplate<String, String>) processorContext.getBean(KafkaTemplate.class);
+    }
+
+    private static TransactionCache transactionCache() {
+        return apiContext.getBean(TransactionCache.class);
+    }
+
+    private static StringRedisTemplate redis() {
+        return apiContext.getBean(StringRedisTemplate.class);
     }
 
     private static void assertDatabaseState(String idempotencyKey, UUID transactionId) throws Exception {

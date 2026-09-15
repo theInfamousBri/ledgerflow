@@ -1,6 +1,6 @@
 # LedgerFlow
 
-LedgerFlow is a production-minded transaction-processing platform built to demonstrate reliable asynchronous backend design with Java 21, Spring Boot, Kafka, and PostgreSQL.
+LedgerFlow is a production-minded transaction-processing platform built to demonstrate reliable asynchronous backend design with Java 21, Spring Boot, Kafka, PostgreSQL, and Redis.
 
 ## What exists in this skeleton
 
@@ -8,7 +8,7 @@ LedgerFlow is a production-minded transaction-processing platform built to demon
 - `transaction-processor`: consumes processing and reconciliation requests, protects provider calls with retries and a circuit breaker, and emits processing/result events.
 - `payment-provider-simulator`: deterministic idempotent stand-in for an unreliable downstream provider.
 - `transaction-contracts`: versioned event and provider DTOs shared during the first development phase.
-- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL and Kafka containers and verifies the complete lifecycle, concurrent idempotency, Kafka redelivery, retries, timeouts, circuit breaking, and dead-letter handling.
+- `ledgerflow-e2e-tests`: boots the three applications against ephemeral PostgreSQL, Kafka, and Redis containers and verifies the complete lifecycle, concurrent idempotency, Kafka redelivery, retries, timeouts, circuit breaking, dead-letter handling, reconciliation, and cache behavior.
 - `docs`: technical specification, architecture, and ADRs.
 
 ## Architecture
@@ -17,6 +17,7 @@ LedgerFlow is a production-minded transaction-processing platform built to demon
 flowchart TD
     Client["Client"] --> API["Transaction API"]
     API --> Database[("PostgreSQL")]
+    API -. "cache-aside reads" .-> Redis[("Redis")]
     Database --> Publisher["Outbox Publisher"]
     Publisher --> Requested["Kafka requested topic"]
     Requested --> Processor["Transaction Processor"]
@@ -49,7 +50,7 @@ flowchart TD
     Status --> API["Transaction API"]
 ```
 
-PostgreSQL is the source of record. Redis is deliberately deferred until a measured caching or coordination use case exists.
+PostgreSQL is the source of record. Redis accelerates repeated transaction-status reads but is never consulted for creation, idempotency, state transitions, or event publication. Cache failures fall back to PostgreSQL.
 
 The transactional outbox prevents lost events across the database/Kafka boundary, while idempotency, retry topics, circuit breaking, and dead-letter handling make at-least-once processing safe.
 
@@ -82,7 +83,7 @@ curl http://localhost:8080/transactions/{transactionId}
 
 Health endpoints are available at `/actuator/health` on ports 8080, 8081, and 8082.
 
-Outbox metrics are available through the transaction API's Actuator metrics and Prometheus endpoints:
+Operational metrics are available through the transaction API's Actuator metrics and Prometheus endpoints:
 
 - `ledgerflow.outbox.pending`
 - `ledgerflow.outbox.oldest.pending.age`
@@ -95,6 +96,11 @@ Outbox metrics are available through the transaction API's Actuator metrics and 
 - `ledgerflow.reconciliation.resolved`
 - `ledgerflow.reconciliation.unresolved`
 - `ledgerflow.reconciliation.failure`
+- `ledgerflow.cache.transaction.hit`
+- `ledgerflow.cache.transaction.miss`
+- `ledgerflow.cache.transaction.write`
+- `ledgerflow.cache.transaction.eviction`
+- `ledgerflow.cache.transaction.failure`
 
 Published outbox events are retained for seven days by default and then removed in bounded, concurrency-safe batches. Unpublished events are never eligible for cleanup.
 
@@ -114,7 +120,7 @@ Windows PowerShell:
 .\mvnw.cmd clean verify
 ```
 
-`verify` requires a running Docker engine because the Failsafe integration-test phase starts isolated PostgreSQL and Kafka containers. Unit tests alone can be run without Docker:
+`verify` requires a running Docker engine because the Failsafe integration-test phase starts isolated PostgreSQL, Kafka, and Redis containers. Unit tests alone can be run without Docker:
 
 ```bash
 ./mvnw test
@@ -124,8 +130,7 @@ See [the testing guide](docs/testing.md) for the end-to-end topology and debuggi
 
 ## Delivery roadmap
 
-1. Add Redis only for justified acceleration or coordination.
-2. Add OpenTelemetry, Prometheus, Grafana, and trace examples.
-3. Add Kubernetes manifests, IaC, and measured load tests.
+1. Add OpenTelemetry, Prometheus, Grafana, and trace examples.
+2. Add Kubernetes manifests, IaC, and measured load tests.
 
 See [the technical specification](docs/technical-specification.md) for the precise contracts and invariants.
