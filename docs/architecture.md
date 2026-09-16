@@ -44,6 +44,20 @@ Published outbox rows are retained for a configurable period and then removed in
 
 Repeated transaction retrieval uses a cache-aside Redis layer. PostgreSQL remains authoritative: cache misses and Redis failures read from PostgreSQL, while status changes evict only after their database transaction commits. A short TTL bounds staleness if eviction fails. See [ADR-009](adr/ADR-009-redis-transaction-read-cache.md).
 
+## Trace flow
+
+```mermaid
+flowchart TD
+    HTTP[Client HTTP span] --> Stored[Trace context in outbox]
+    Stored --> Publish[Outbox publication span]
+    Publish --> Kafka[Kafka producer and consumer spans]
+    Kafka --> Provider[Provider HTTP spans]
+    Provider --> OTLP[OTLP export]
+    OTLP --> Jaeger[Jaeger trace]
+```
+
+The HTTP request and database commit finish before the outbox scheduler runs. Persisting `traceparent` and `tracestate` with the outbox row lets the publisher restore the original parent without weakening the transactional-outbox design. Kafka observations then carry W3C headers across both requested and status topics, and the auto-configured `RestClient.Builder` carries them to the provider. See [ADR-010](adr/ADR-010-w3c-trace-context-through-outbox.md).
+
 ## Reconciliation sequence
 
 ```mermaid

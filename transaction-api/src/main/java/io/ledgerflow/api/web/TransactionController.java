@@ -1,6 +1,7 @@
 package io.ledgerflow.api.web;
 
 import io.ledgerflow.api.service.TransactionService;
+import io.ledgerflow.api.observability.TraceContextBridge;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
@@ -16,9 +17,11 @@ import java.util.UUID;
 @RequestMapping("/transactions")
 public class TransactionController {
     private final TransactionService service;
+    private final TraceContextBridge traces;
 
-    public TransactionController(TransactionService service) {
+    public TransactionController(TransactionService service, TraceContextBridge traces) {
         this.service = service;
+        this.traces = traces;
     }
 
     @PostMapping
@@ -27,8 +30,9 @@ public class TransactionController {
             @Pattern(regexp = "[\\x21-\\x7E]+") String idempotencyKey,
             @RequestHeader(value = "X-Trace-Id", required = false) String suppliedTraceId,
             @Valid @RequestBody CreateTransactionRequest request) {
-        String traceId = suppliedTraceId == null || suppliedTraceId.isBlank()
-                ? UUID.randomUUID().toString() : suppliedTraceId;
+        String traceId = traces.currentTraceId().orElseGet(() ->
+                suppliedTraceId == null || suppliedTraceId.isBlank()
+                        ? UUID.randomUUID().toString() : suppliedTraceId);
         var result = service.create(idempotencyKey, request, traceId);
         var status = result.created() ? HttpStatus.ACCEPTED : HttpStatus.OK;
         return ResponseEntity.status(status)

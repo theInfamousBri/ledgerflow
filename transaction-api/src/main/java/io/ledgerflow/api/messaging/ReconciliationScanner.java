@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.ledgerflow.api.domain.OutboxEventEntity;
 import io.ledgerflow.api.repository.OutboxEventRepository;
 import io.ledgerflow.api.repository.TransactionRepository;
+import io.ledgerflow.api.observability.TraceContextBridge;
 import io.ledgerflow.contracts.TransactionReconciliationRequestedEvent;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -36,6 +37,7 @@ public class ReconciliationScanner {
     private final int batchSize;
     private final Counter scans;
     private final Counter requested;
+    private final TraceContextBridge traces;
 
     public ReconciliationScanner(
             TransactionRepository transactions,
@@ -43,6 +45,7 @@ public class ReconciliationScanner {
             ObjectMapper objectMapper,
             Clock clock,
             MeterRegistry registry,
+            TraceContextBridge traces,
             @Value("${ledgerflow.reconciliation.stale-after:2m}") Duration staleAfter,
             @Value("${ledgerflow.reconciliation.retry-delay:5m}") Duration retryDelay,
             @Value("${ledgerflow.reconciliation.batch-size:100}") int batchSize) {
@@ -68,6 +71,7 @@ public class ReconciliationScanner {
         this.requested = Counter.builder("ledgerflow.reconciliation.requested")
                 .description("Stale transactions queued for provider reconciliation")
                 .register(registry);
+        this.traces = traces;
     }
 
     @Scheduled(
@@ -88,12 +92,15 @@ public class ReconciliationScanner {
                     "reconcile-" + eventId,
                     now);
             transaction.markReconciliationRequested(now);
+            var traceContext = traces.capture();
             outbox.save(new OutboxEventEntity(
                     eventId,
                     transaction.getId(),
                     RECONCILIATION_TOPIC,
                     serialize(event),
-                    now));
+                    now,
+                    traceContext.traceParent(),
+                    traceContext.traceState()));
         }
 
         if (!candidates.isEmpty()) {

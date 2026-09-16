@@ -5,6 +5,10 @@ spring:
     name: transaction-processor
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    listener:
+      observation-enabled: true
+    template:
+      observation-enabled: true
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
@@ -32,6 +36,12 @@ resilience4j:
         automatic-transition-from-open-to-half-open-enabled: true
         event-consumer-buffer-size: 50
 management:
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+  otlp:
+    tracing:
+      endpoint: ${OTLP_TRACING_ENDPOINT:http://localhost:4318/v1/traces}
   endpoints:
     web:
       exposure:
@@ -40,3 +50,7 @@ management:
     health:
       probes:
         enabled: true
+logging:
+  pattern:
+    correlation: "[${spring.application.name:},%X{traceId:-},%X{spanId:-}] "
+  include-application-name: false

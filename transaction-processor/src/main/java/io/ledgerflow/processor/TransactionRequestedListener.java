@@ -35,6 +35,8 @@ public class TransactionRequestedListener {
     @KafkaListener(topics = "ledgerflow.transaction.requested.v1", groupId = "transaction-processor-v1")
     public void onRequested(String payload) throws Exception {
         var request = objectMapper.readValue(payload, TransactionRequestedEvent.class);
+        log.info("Processing transaction transactionId={} eventId={}",
+                request.transactionId(), request.eventId());
         publish(status(request, TransactionStatus.PROCESSING, null, null));
 
         var response = provider.process(request);
@@ -42,6 +44,8 @@ public class TransactionRequestedListener {
 
         var finalStatus = response.approved() ? TransactionStatus.COMPLETED : TransactionStatus.FAILED;
         publish(status(request, finalStatus, response.providerReference(), response.failureCode()));
+        log.info("Finished transaction transactionId={} status={} providerReference={}",
+                request.transactionId(), finalStatus, response.providerReference());
     }
 
     @DltHandler

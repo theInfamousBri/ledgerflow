@@ -3,12 +3,15 @@ package io.ledgerflow.api.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.ledgerflow.api.domain.*;
+import io.ledgerflow.api.observability.TraceContextBridge;
 import io.ledgerflow.api.repository.*;
 import io.ledgerflow.api.web.CreateTransactionRequest;
 import io.ledgerflow.api.web.TransactionResponse;
 import io.ledgerflow.contracts.*;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -20,6 +23,7 @@ import java.util.UUID;
 @Service
 public class TransactionService {
     public static final String REQUESTED_TOPIC = "ledgerflow.transaction.requested.v1";
+    private static final Logger log = LoggerFactory.getLogger(TransactionService.class);
 
     private final TransactionRepository transactions;
     private final TransactionStatusHistoryRepository history;
@@ -27,19 +31,22 @@ public class TransactionService {
     private final ObjectMapper objectMapper;
     private final IdempotencyLock idempotencyLock;
     private final TransactionCache cache;
+    private final TraceContextBridge traces;
 
     public TransactionService(TransactionRepository transactions,
                               TransactionStatusHistoryRepository history,
                               OutboxEventRepository outbox,
                               ObjectMapper objectMapper,
                               IdempotencyLock idempotencyLock,
-                              TransactionCache cache) {
+                              TransactionCache cache,
+                              TraceContextBridge traces) {
         this.transactions = transactions;
         this.history = history;
         this.outbox = outbox;
         this.objectMapper = objectMapper;
         this.idempotencyLock = idempotencyLock;
         this.cache = cache;
+        this.traces = traces;
     }
 
     @Transactional
@@ -65,7 +72,10 @@ public class TransactionService {
 
         var event = new TransactionRequestedEvent(eventId, 1, transactionId, request.accountId(),
                 request.amount(), request.currency(), request.type(), traceId, now);
-        outbox.save(new OutboxEventEntity(eventId, transactionId, REQUESTED_TOPIC, serialize(event), now));
+        var traceContext = traces.capture();
+        outbox.save(new OutboxEventEntity(eventId, transactionId, REQUESTED_TOPIC, serialize(event), now,
+                traceContext.traceParent(), traceContext.traceState()));
+        log.info("Accepted transaction transactionId={} eventId={}", transactionId, eventId);
         return new CreationResult(toResponse(entity), true);
     }
 
@@ -95,6 +105,8 @@ public class TransactionService {
         entity.transitionTo(event.status(), event.providerReference(), event.failureCode(), event.occurredAt());
         history.save(new TransactionStatusHistoryEntity(UUID.randomUUID(), event.transactionId(), event.status(),
                 event.eventId(), event.failureCode(), event.occurredAt()));
+        log.info("Applied transaction status transactionId={} eventId={} status={}",
+                event.transactionId(), event.eventId(), event.status());
     }
 
     private TransactionResponse toResponse(TransactionEntity entity) {

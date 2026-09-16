@@ -28,3 +28,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate Compose
         run: docker compose config --quiet
+
+  container-images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build service images
+        run: docker compose build transaction-api transaction-processor payment-provider-simulator

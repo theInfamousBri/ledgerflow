@@ -71,6 +71,25 @@ A falling hit ratio may indicate a TTL that is too short for the polling pattern
 | `REDIS_COMMAND_TIMEOUT` | `200ms` | Maximum Redis command time before fallback |
 | `TRANSACTION_CACHE_TTL` | `30s` | Maximum lifetime of a cached transaction response |
 
+## Distributed tracing
+
+Each service exports OTLP/HTTP spans to the OpenTelemetry Collector. The collector batches and forwards traces to Jaeger, whose local UI is available at `http://localhost:16686`. Successful-path logs include a correlation prefix in the form `[application,traceId,spanId]` and retain transaction/event identifiers as structured key-value text.
+
+The transaction API returns the active OpenTelemetry trace ID in `X-Trace-Id`. Search for that value in Jaeger when diagnosing a specific request. The expected lifecycle includes the inbound API span, `ledgerflow.outbox.publish`, Kafka producer/consumer spans, and the provider HTTP exchange.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `OTLP_TRACING_ENDPOINT` | `http://localhost:4318/v1/traces` | OTLP/HTTP trace receiver for an individually run service |
+| `TRACING_SAMPLING_PROBABILITY` | `1.0` | Fraction of traces sampled; deterministic locally, reduce for production load |
+
+Telemetry is deliberately outside the correctness path. If Jaeger is empty:
+
+1. Confirm the transaction still completes; do not treat trace export failure as a processing failure.
+2. Check `docker compose logs otel-collector` for receiver or exporter errors.
+3. Check `docker compose logs jaeger` and confirm the UI responds on port `16686`.
+4. Confirm services are configured for `http://otel-collector:4318/v1/traces` inside Compose.
+5. Search application logs using the response’s `X-Trace-Id` even if export is unavailable.
+
 ## Reconciliation
 
 Reconciliation candidates are transactions whose status remains `PROCESSING` beyond `RECONCILIATION_STALE_AFTER`. Each claimed row records when reconciliation was requested and increments its attempt count. Unresolved rows cannot be requested again until `RECONCILIATION_RETRY_DELAY` passes.
