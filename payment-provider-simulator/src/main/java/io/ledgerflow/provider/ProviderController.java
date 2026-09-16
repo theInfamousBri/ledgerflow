@@ -15,10 +15,13 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @RestController
 @RequestMapping("/provider/payments")
 public class ProviderController {
+    private static final Logger log = LoggerFactory.getLogger(ProviderController.class);
     private final Map<UUID, ProviderPaymentResponse> decisions = new ConcurrentHashMap<>();
     private final Map<UUID, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
     private final Map<UUID, List<Instant>> attemptTimes = new ConcurrentHashMap<>();
@@ -65,6 +68,8 @@ public class ProviderController {
         }
         var decision = new ProviderPaymentResponse(true, "sim-" + UUID.randomUUID(), null);
         decisions.putIfAbsent(request.transactionId(), decision);
+        log.info("Recorded provider decision transactionId={} providerReference={}",
+                request.transactionId(), decisions.get(request.transactionId()).providerReference());
         return decisions.get(request.transactionId());
     }
 

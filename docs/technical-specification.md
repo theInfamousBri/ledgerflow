@@ -158,7 +158,7 @@ Published rows are retained for seven days by default, then removed in configura
 
 ## 10. Observability
 
-Every request/event carries W3C trace context when OpenTelemetry is added. Initial logs include transaction ID, event ID, and trace ID as structured fields. Actuator exposes liveness/readiness and Micrometer metrics.
+Every instrumented boundary carries W3C trace context. The API persists `traceparent` and `tracestate` beside outbox events so a later scheduler can resume the originating trace before Kafka publication. Kafka observations propagate context to consumers, and the Boot-managed `RestClient.Builder` propagates it to the provider. Services export OTLP spans through a collector to Jaeger. Logs include application, trace ID, span ID, transaction ID, and event ID where applicable.
 
 Current operational signals include outbox backlog/age/outcomes/cleanup plus reconciliation scans, requests, resolutions, unresolved lookups, and exhausted failures. Future dashboards add API latency/error rate, Kafka consumer lag, provider latency/failure/circuit state, and transitions by result.
 
@@ -166,8 +166,8 @@ Current operational signals include outbox backlog/age/outcomes/cleanup plus rec
 
 The MVP end-to-end Testcontainers test proves POST → outbox → Kafka → processor → provider → result event → COMPLETED, verifies ordered history and the published outbox row, and confirms that an identical idempotent replay returns the original resource.
 
-The end-to-end suite covers concurrent duplicate submissions, requested-event redelivery, successful recovery after transient provider failures and ambiguous provider timeouts, exponential backoff, circuit opening/recovery, exhausted-retry DLT routing, terminal failure handling, published-event retention cleanup, and repair of a stuck transaction from its recorded provider decision. Further hardening adds tests for key/payload conflict, Kafka outage recovery, outbox duplicate publication, and illegal transitions.
+The end-to-end suite covers concurrent duplicate submissions, requested-event redelivery, successful recovery after transient provider failures and ambiguous provider timeouts, exponential backoff, circuit opening/recovery, exhausted-retry DLT routing, terminal failure handling, published-event retention cleanup, repair of a stuck transaction from its recorded provider decision, Redis caching, and one exported trace spanning API, outbox, Kafka, processor, and provider. Further hardening adds tests for key/payload conflict, Kafka outage recovery, outbox duplicate publication, and illegal transitions.
 
 ## 12. Explicit deferrals
 
-The OpenTelemetry collector/dashboard stack, Kubernetes, AWS deployment, and load tests remain planned. Redis is used only as a non-authoritative transaction read cache; PostgreSQL continues to own all correctness decisions.
+Prometheus/Grafana dashboards, Kubernetes, AWS deployment, and load tests remain planned. Redis and OpenTelemetry remain non-authoritative infrastructure; PostgreSQL continues to own all correctness decisions.

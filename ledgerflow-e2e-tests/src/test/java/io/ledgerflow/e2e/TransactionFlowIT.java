@@ -37,6 +37,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
+import org.testcontainers.containers.wait.strategy.Wait;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -89,6 +90,12 @@ class TransactionFlowIT {
             .withCommand("redis-server", "--save", "", "--appendonly", "no")
             .withExposedPorts(6379);
 
+    @Container
+    private static final GenericContainer<?> JAEGER = new GenericContainer<>(
+            DockerImageName.parse("jaegertracing/jaeger:2.20.0"))
+            .withExposedPorts(4318, 16686)
+            .waitingFor(Wait.forHttp("/").forPort(16686));
+
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(2))
@@ -99,6 +106,7 @@ class TransactionFlowIT {
     private static ConfigurableApplicationContext apiContext;
     private static String apiBaseUrl;
     private static String providerBaseUrl;
+    private static String jaegerBaseUrl;
 
     @BeforeAll
     static void startSystem() {
@@ -107,7 +115,9 @@ class TransactionFlowIT {
                 "--server.port=0",
                 "--spring.autoconfigure.exclude=" + NO_DATABASE_AUTOCONFIGURATION,
                 "--provider.failure-rate=0.0",
-                "--provider.latency-ms=0");
+                "--provider.latency-ms=0",
+                "--management.tracing.sampling.probability=1.0",
+                "--management.otlp.tracing.endpoint=" + jaegerOtlpEndpoint());
         int providerPort = localPort(providerContext);
         providerBaseUrl = "http://localhost:" + providerPort;
 
@@ -123,6 +133,10 @@ class TransactionFlowIT {
                 "--spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer",
                 "--spring.kafka.consumer.auto-offset-reset=earliest",
                 "--spring.kafka.consumer.enable-auto-commit=false",
+                "--spring.kafka.listener.observation-enabled=true",
+                "--spring.kafka.template.observation-enabled=true",
+                "--management.tracing.sampling.probability=1.0",
+                "--management.otlp.tracing.endpoint=" + jaegerOtlpEndpoint(),
                 "--ledgerflow.provider.base-url=" + providerBaseUrl,
                 "--ledgerflow.provider.read-timeout=250ms",
                 "--resilience4j.circuitbreaker.instances.paymentProvider.sliding-window-type=COUNT_BASED",
@@ -148,6 +162,9 @@ class TransactionFlowIT {
                 "--spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer",
                 "--spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer",
                 "--spring.kafka.consumer.auto-offset-reset=earliest",
+                "--spring.kafka.listener.observation-enabled=true",
+                "--management.tracing.sampling.probability=1.0",
+                "--management.otlp.tracing.endpoint=" + jaegerOtlpEndpoint(),
                 "--spring.data.redis.host=" + REDIS.getHost(),
                 "--spring.data.redis.port=" + REDIS.getMappedPort(6379),
                 "--spring.data.redis.connect-timeout=200ms",
@@ -160,6 +177,7 @@ class TransactionFlowIT {
                 "--ledgerflow.reconciliation.retry-delay=5m",
                 "--ledgerflow.reconciliation.initial-delay=1h");
         apiBaseUrl = "http://localhost:" + localPort(apiContext);
+        jaegerBaseUrl = "http://" + JAEGER.getHost() + ":" + JAEGER.getMappedPort(16686);
     }
 
     @BeforeEach
@@ -586,6 +604,35 @@ class TransactionFlowIT {
         assertThat(statuses(refreshed)).containsExactly("PENDING", "PROCESSING", "COMPLETED");
     }
 
+    @Test
+    void propagatesOneTraceAcrossHttpOutboxKafkaAndProvider() throws Exception {
+        String traceId = UUID.randomUUID().toString().replace("-", "");
+        String traceParent = "00-" + traceId + "-0123456789abcdef-01";
+        String idempotencyKey = "e2e-tracing-" + UUID.randomUUID();
+
+        var created = postTransaction(
+                idempotencyKey,
+                requestBody("acct-tracing", "91.40"),
+                traceParent);
+
+        assertThat(created.statusCode()).isEqualTo(202);
+        assertThat(created.headers().firstValue("X-Trace-Id")).contains(traceId);
+        String transactionId = JSON.readTree(created.body()).path("id").asText();
+        awaitCompleted(transactionId);
+
+        JsonNode trace = awaitJaegerTrace(traceId);
+        Set<String> services = StreamSupport.stream(
+                        trace.path("processes").spliterator(), false)
+                .map(process -> process.path("serviceName").asText())
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> operations = StreamSupport.stream(trace.path("spans").spliterator(), false)
+                .map(span -> span.path("operationName").asText())
+                .collect(java.util.stream.Collectors.toSet());
+
+        assertThat(services).contains("e2e-api", "e2e-processor", "e2e-provider");
+        assertThat(operations).contains("ledgerflow.outbox.publish");
+    }
+
     private static ConfigurableApplicationContext start(Class<?> application, String... properties) {
         String[] arguments = new String[properties.length + 2];
         arguments[0] = "--spring.config.name=ledgerflow-e2e";
@@ -602,13 +649,18 @@ class TransactionFlowIT {
     }
 
     private static HttpResponse<String> postTransaction(String idempotencyKey, String body) throws Exception {
+        return postTransaction(idempotencyKey, body, null);
+    }
+
+    private static HttpResponse<String> postTransaction(
+            String idempotencyKey, String body, String traceParent) throws Exception {
         var request = HttpRequest.newBuilder(URI.create(apiBaseUrl + "/transactions"))
                 .timeout(Duration.ofSeconds(5))
                 .header("Content-Type", "application/json")
                 .header("Idempotency-Key", idempotencyKey)
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-        return HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        if (traceParent != null) request.header("traceparent", traceParent);
+        return HTTP.send(request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private static HttpResponse<String> getTransaction(String transactionId) throws Exception {
@@ -708,6 +760,37 @@ class TransactionFlowIT {
                     providerPayment[0] = body;
                 });
         return providerPayment[0];
+    }
+
+    private static JsonNode awaitJaegerTrace(String traceId) {
+        var result = new JsonNode[1];
+        await().atMost(Duration.ofSeconds(30))
+                .pollInterval(Duration.ofMillis(500))
+                .untilAsserted(() -> {
+                    var request = HttpRequest.newBuilder(
+                                    URI.create(jaegerBaseUrl + "/api/traces/" + traceId))
+                            .timeout(Duration.ofSeconds(5))
+                            .GET()
+                            .build();
+                    var response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+                    assertThat(response.statusCode()).isEqualTo(200);
+                    JsonNode body = JSON.readTree(response.body());
+                    assertThat(body.path("data").isArray()).isTrue();
+                    assertThat(body.path("data").size()).isGreaterThan(0);
+                    JsonNode trace = body.path("data").get(0);
+                    Set<String> services = StreamSupport.stream(
+                                    trace.path("processes").spliterator(), false)
+                            .map(process -> process.path("serviceName").asText())
+                            .collect(java.util.stream.Collectors.toSet());
+                    Set<String> operations = StreamSupport.stream(
+                                    trace.path("spans").spliterator(), false)
+                            .map(span -> span.path("operationName").asText())
+                            .collect(java.util.stream.Collectors.toSet());
+                    assertThat(services).contains("e2e-api", "e2e-processor", "e2e-provider");
+                    assertThat(operations).contains("ledgerflow.outbox.publish");
+                    result[0] = trace;
+                });
+        return result[0];
     }
 
     private static CircuitBreaker paymentProviderCircuitBreaker() {
@@ -895,6 +978,11 @@ class TransactionFlowIT {
     private static String jdbcUrl() {
         return "jdbc:postgresql://%s:%d/%s".formatted(
                 POSTGRES.getHost(), POSTGRES.getMappedPort(5432), DATABASE_NAME);
+    }
+
+    private static String jaegerOtlpEndpoint() {
+        return "http://%s:%d/v1/traces".formatted(
+                JAEGER.getHost(), JAEGER.getMappedPort(4318));
     }
 
     private static void close(ConfigurableApplicationContext context) {

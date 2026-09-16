@@ -5,13 +5,13 @@
 | Layer | Maven phase | Docker | Purpose |
 | --- | --- | --- | --- |
 | Unit | `test` | No | Fast domain and component behavior |
-| End-to-end | `integration-test` / `verify` | Yes | Real PostgreSQL, Kafka, Redis, HTTP, and all three applications |
+| End-to-end | `integration-test` / `verify` | Yes | Real PostgreSQL, Kafka, Redis, Jaeger, HTTP, and all three applications |
 
 The `ledgerflow-e2e-tests` module is last in the reactor and uses Maven Failsafe, so its `*IT` tests run during `verify` rather than Surefire's unit-test phase.
 
 ## End-to-end topology
 
-`TransactionFlowIT` starts ephemeral PostgreSQL, Kafka, and Redis containers on random host ports. It then boots the provider simulator, processor, and transaction API in the test JVM on random web ports. No manually running Compose services or fixed ports are required.
+`TransactionFlowIT` starts ephemeral PostgreSQL, Kafka, Redis, and Jaeger containers on random host ports. It then boots the provider simulator, processor, and transaction API in the test JVM on random web ports. No manually running Compose services or fixed ports are required.
 
 The tests verify:
 
@@ -45,10 +45,14 @@ The tests verify:
 28. The first uncached transaction read records a miss and populates Redis with a bounded TTL; the second read records a cache hit.
 29. A committed status transition evicts a deliberately stale cached representation before the next read repopulates it.
 30. Unit coverage proves a Redis connection failure becomes a cache miss and that eviction waits for database commit.
+31. A supplied W3C `traceparent` is restored from the outbox and explicitly injected into Kafka headers, surviving Kafka consumption and the provider HTTP call under one trace ID.
+32. Jaeger’s query API confirms that the same trace contains API, processor, and provider service spans plus the explicit outbox publication span.
 
 The redelivery scenario intentionally does not claim exactly-once execution. The processor can call an external dependency again after Kafka redelivery. LedgerFlow instead requires an idempotent provider contract and idempotent state application so the repeated attempt cannot create a second payment effect or corrupt transaction history.
 
 The provider's fail-first control is deterministic and one-shot. This keeps retry tests repeatable while leaving the random failure-rate option available for exploratory local testing.
+
+CI also validates the Compose model and builds all three service images. This catches drift between the Maven reactor and the Docker build context, including missing module POMs in the dependency-caching layer.
 
 The dead-letter assertion uses a separate Kafka consumer group with `earliest` offset behavior. This verifies the retained DLT key and payload independently of the application's DLT handler.
 
@@ -59,6 +63,8 @@ Circuit-breaker state is reset before each scenario so retry, DLT, timeout, and 
 The cleanup scenario first confirms the event was published, moves only that row beyond the seven-day retention window, and invokes one maintenance batch. Recent published events and all unpublished events remain ineligible. Unit coverage verifies the bounded cutoff calculation plus scheduled backlog and oldest-age metric snapshots.
 
 The reconciliation scenario first completes a real provider operation, then constructs the precise database state produced if its terminal status were lost. A bounded scan writes a reconciliation request through the outbox, the processor retrieves the existing decision without another provider mutation, and the normal status consumer repairs authoritative state. Unit coverage separately proves unresolved lookups emit no status event.
+
+The tracing scenario supplies a deterministic sampled W3C parent and queries the real Jaeger backend after the transaction completes. This verifies exported span relationships rather than merely checking that trace libraries exist on the classpath.
 
 ## Commands
 
@@ -80,4 +86,4 @@ Run only the end-to-end module while also building its required service modules:
 .\mvnw.cmd verify -pl ledgerflow-e2e-tests -am
 ```
 
-The first run downloads the Testcontainers dependencies and PostgreSQL/Kafka/Redis images. Testcontainers cleans up its ephemeral containers automatically after the test process exits.
+The first run downloads the Testcontainers dependencies and PostgreSQL/Kafka/Redis/Jaeger images. Testcontainers cleans up its ephemeral containers automatically after the test process exits.

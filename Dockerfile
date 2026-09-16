@@ -6,6 +6,7 @@ COPY transaction-contracts/pom.xml transaction-contracts/pom.xml
 COPY transaction-api/pom.xml transaction-api/pom.xml
 COPY transaction-processor/pom.xml transaction-processor/pom.xml
 COPY payment-provider-simulator/pom.xml payment-provider-simulator/pom.xml
+COPY ledgerflow-e2e-tests/pom.xml ledgerflow-e2e-tests/pom.xml
 RUN mvn -q -pl "${MODULE}" -am dependency:go-offline
 COPY . .
 RUN mvn -q -pl "${MODULE}" -am package -DskipTests
